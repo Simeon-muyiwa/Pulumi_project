@@ -1,0 +1,31 @@
+{
+    "builders": [
+      {
+        "type": "amazon-ebs",
+        "region": "eu-west-2",  
+        "source_ami": "ami-0ecfcd708c13eb9c3",
+        "instance_type": "t2.micro",  
+        "ami_name": "ubuntu-jammy-{{timestamp}}",  
+        "ssh_username": "ubuntu",  
+        "tags": {
+          "Name": "Kubeadm common AMI"
+        },
+        "ami_regions": ["eu-west-2"], 
+        "associate_public_ip_address": true,  
+        "ssh_agent_auth": true,  
+        "run_tags": {
+          "Name": "Ubuntu Jammy Image Build"
+        }
+      }
+    ],
+    "provisioners": [
+      {
+        "type": "shell",
+        "inline": [
+          "sudo apt-get update",
+          "sudo apt-get upgrade -y",
+          "sudo apt-get install -y python3-pip"
+        ]
+      }
+    ]
+  }
