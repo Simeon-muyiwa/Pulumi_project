@@ -24,7 +24,7 @@
     # Add Docker repository
     - name: Add Docker repository
       apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        repo: "deb [arch=arm64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
         state: present
 
     # Install containerd
