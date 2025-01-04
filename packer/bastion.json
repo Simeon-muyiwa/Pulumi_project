@@ -8,7 +8,7 @@
         "ami_name": "ubuntu-jammy-{{timestamp}}",
         "ssh_username": "ubuntu",
         "tags": {
-          "Name": "Kubeadm common AMI"
+          "Name": "Bastion AMI"
         },
         "ami_regions": ["eu-west-2"],
         "associate_public_ip_address": true,
@@ -19,19 +19,10 @@
       }
     ],
     "provisioners": [
-      {
-        "type": "shell",
-        "inline": [
-          "sudo apt-get update",
-          "sudo apt-get upgrade -y",
-          "sudo apt-get install -y python3-pip",
-          "sudo apt-get install -y sshpass",
-          "sudo pip3 install ansible"
-        ]
-      },
+      
       {
         "type": "ansible",
-        "playbook_file": "../ansible/common_kubeadm.yaml"
+        "playbook_file": "../ansible/bastion.yaml"
       }
     ]
   }

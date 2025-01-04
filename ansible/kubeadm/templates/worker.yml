@@ -1,0 +1,11 @@
+- hosts: workers
+  become: yes
+  tasks:
+    - name: Enable TCP port 6443 (On Master) is able to connect from Worker
+      wait_for: "host=YOUR_MASTER_IP port=6443 timeout=1"
+
+    - name: Join worker to cluster
+      shell: "{{ hostvars['YOUR_MASTER_IP'].join_command }} >> node_joined.log"
+      args:
+        chdir: /home/YOUR_USERPROFILE_NAME
+        creates: node_joined.log

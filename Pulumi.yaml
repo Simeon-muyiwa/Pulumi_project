@@ -1,4 +1,4 @@
-name: quirky-lithium-thorny-dragon
+name: kube-cluster-deployment
 description: A minimal TypeScript Pulumi program
 runtime:
   name: nodejs
@@ -8,3 +8,4 @@ config:
   pulumi:tags:
     value:
       pulumi:template: typescript
+  kubernetes:cluster_name: kubeadm_cluster

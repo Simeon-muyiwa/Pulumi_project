@@ -1,0 +1,5 @@
+- hosts: all
+  become: true
+  roles:
+    - name: devsec.hardening.ssh_hardening
+    - name: devsec.hardening.os_hardening
