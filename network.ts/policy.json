@@ -1,0 +1,178 @@
+{
+    "masterPolicy": {
+        "Version": "2012-10-17",
+        "Statement": [
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeInstances",
+        "ec2:AttachVolume",
+        "ec2:DetachVolume"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+        ],"Resource": "arn:aws:ec2:*:*:volume/*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:DescribeTags"
+        ],
+        "Resource": "arn:aws:ec2:*:*:instance/*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeVolumes"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeRegions"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeSubnets"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeSecurityGroups"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:DescribeInstances"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+        "elasticloadbalancing:DeregisterTargets","elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeLoadBalancerTargetGroups",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DescribeTargetGroupAttributes",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+        "elasticloadbalancing:RegisterTargets"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeLaunchConfigurations",
+        "autoscaling:UpdateAutoScalingGroup"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "s3:GetObject"
+        ],
+        "Resource": "*"
+        },
+        {
+        "Effect": "Allow",
+        "Action": [
+        "s3:ListBucket"
+        ],
+        "Resource": "*"
+        }
+        ]
+        },
+        
+    "workerPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeInstances",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeSubnets",
+            "ec2:DescribeVpcs",
+            "eks:DescribeCluster",
+            "eks:DescribeNodegroup",
+            "autoscaling:DescribeAutoScalingGroups",
+            "cloudwatch:DescribeAlarms",
+            "cloudwatch:GetMetricData",
+            "ecr:GetAuthorizationToken",
+            "ecr:BatchGetImage",
+            "ecr:GetDownloadUrlForLayer"
+          ],
+          "Resource": "*"
+        }
+      ]
+    },
+    "bastionHostPolicy": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeInstances",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeSubnets",
+            "ec2:DescribeVpcs",
+            "ec2:StartInstances",
+            "ec2:StopInstances",
+            "ec2:RebootInstances",
+            "ec2:TerminateInstances",
+            "ec2:CreateTags"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+  }

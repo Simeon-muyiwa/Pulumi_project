@@ -1,44 +1,39 @@
 ---
-- hosts: master
+- name: Initialize Master Node
+  hosts: master
   become: yes
-  tasks:
-    - name: Create an Empty file for Kubeadm configuring
-      copy:
-        content: ""
-        dest: /etc/kubernetes/kubeadm-config.yaml
-        force: no
+  vars:
+    shared_directory: /tmp/kubeadm_shared
+    kubectl_version: "1.29.*"
+    pod_network: "10.244.0.0/16"
+    api_server_port: 6443
+    etcd_client_port: 2379
+    etcd_server_port: 2380
+    kubelet_port: 10250
 
-    - name: Configure container runtime
-      blockinfile:
-        path: /etc/kubernetes/kubeadm-config.yaml
-        block: |
-          kind: ClusterConfiguration
-          apiVersion: kubeadm.k8s.io/v1beta3
-          networking:
-            podSubnet: "10.244.0.0/16"
-          ---
-          kind: KubeletConfiguration
-          apiVersion: kubelet.config.k8s.io/v1beta1
-          runtimeRequestTimeout: "15m"
-          cgroupDriver: "systemd"
-          systemReserved:
-            cpu: 100m
-            memory: 350M
-          kubeReserved:
-            cpu: 100m
-            memory: 50M
-          enforceNodeAllocatable:
-          - pods
+  tasks:
+    - name: Install Kubectl
+      apt:
+        name: kubectl={{ kubectl_version }}
+        state: present
+        force: yes
+
+    - name: Create Kubeadm Config File
+      copy:
+        content: |
+          {% include 'kubeadm_config.yml.jinja2' %}
+        dest: /etc/kubernetes/kubeadm-config.yaml
 
     - name: Initialize the cluster
-      shell: kubeadm init --config /etc/kubernetes/kubeadm-config.yaml >> cluster_initialized.log
+      shell: |
+        kubeadm init --config /etc/kubernetes/kubeadm-config.yaml >> cluster_initialized.log
       args:
-        chdir: /home/YOUR_USERPROFILE_NAME
+        chdir: /home/{{ ansible_user }}
         creates: cluster_initialized.log
 
     - name: Create .kube directory
       become: yes
-      become_user: YOUR_USERPROFILE_NAME
+      become_user: "{{ ansible_user }}"
       file:
         path: $HOME/.kube
         state: directory
@@ -47,14 +42,62 @@
     - name: Copy admin.conf to User's kube config
       copy:
         src: /etc/kubernetes/admin.conf
-        dest: /home/YOUR_USERPROFILE_NAME/.kube/config
+        dest: $HOME/.kube/config
         remote_src: yes
-        owner: YOUR_USERPROFILE_NAME
+        owner: "{{ ansible_user }}"
 
     - name: Install Pod Network
       become: yes
-      become_user: YOUR_USERPROFILE_NAME
-      shell: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.log
+      become_user: "{{ ansible_user }}"
+      shell: |
+        kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.log
       args:
         chdir: $HOME
         creates: pod_network_setup.log
+
+    - name: Configure Firewall
+      block:
+        - name: Check firewall type
+          stat:
+            path: /usr/bin/firewall-cmd
+          register: firewalld_installed
+          ignore_errors: yes
+
+        - name: Open ports for API Server
+          when: firewalld_installed.stat.exists
+          block:
+            - name: Add API server port
+              shell: "firewall-cmd --add-port={{ api_server_port }}/tcp --permanent"
+              ignore_errors: yes
+            - name: Reload firewall
+              shell: "firewall-cmd --reload"
+              ignore_errors: yes
+
+        - name: Open ports for Etcd
+          when: firewalld_installed.stat.exists
+          block:
+            - name: Add Etcd client port
+              shell: "firewall-cmd --add-port={{ etcd_client_port }}/tcp --permanent"
+              ignore_errors: yes
+            - name: Add Etcd server port
+              shell: "firewall-cmd --add-port={{ etcd_server_port }}/tcp --permanent"
+              ignore_errors: yes
+            - name: Reload firewall
+              shell: "firewall-cmd --reload"
+              ignore_errors: yes
+
+        - name: Open ports for Kubelet
+          when: firewalld_installed.stat.exists
+          block:
+            - name: Add Kubelet port
+              shell: "firewall-cmd --add-port={{ kubelet_port }}/tcp --permanent"
+              ignore_errors: yes
+            - name: Reload firewall
+              shell: "firewall-cmd --reload"
+              ignore_errors: yes
+
+    - name: Set up Bash Completion
+      become: no
+      become_user: "{{ ansible_user }}"
+      shell: |
+        echo 'source ~/.kube/kubectl_completion.sh' >> ~/.bashrc

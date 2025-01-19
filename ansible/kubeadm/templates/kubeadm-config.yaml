@@ -1,0 +1,46 @@
+kind: ClusterConfiguration
+apiVersion: kubeadm.k8s.io/v1beta3
+networking:
+  podSubnet: "{{ pod_network }}"
+
+---
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+runtimeRequestTimeout: "15m"
+cgroupDriver: "systemd"
+systemReserved:
+  cpu: 100m
+  memory: 350M
+kubeReserved:
+  cpu: 100m
+  memory: 50M
+enforceNodeAllocatable:
+  - pods
+
+---
+kind: ApiServer
+apiVersion: kubeadm.k8s.io/v1beta3
+certSANs:
+  - "{{ hostvars['bastion'].ansible_host }}"
+
+---
+kind: Etcd
+apiVersion: kubeadm.k8s.io/v1beta3
+dataDir: "/var/lib/etcd"
+extraArgs:
+  listen-client-urls: "https://127.0.0.1:{{ etcd_client_port }},https://{{ hostvars['bastion'].ansible_host }}:{{ etcd_client_port }}"
+  advertise-client-urls: "https://{{ hostvars['bastion'].ansible_host }}:{{ etcd_client_port }}"
+  initial-advertise-node-token: true
+
+---
+kind: KubeControllerManagerConfiguration
+apiVersion: kubeadm.k8s.io/v1beta3
+clusterCIDR: "0.0.0.0/0"
+serviceClusterIPRange: "10.32.0.0/19"
+enableIPVS: false
+port: 10252
+
+---
+kind: Scheduler
+apiVersion: kubeadm.k8s.io/v1beta3
+port: 10251

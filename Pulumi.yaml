@@ -8,4 +8,7 @@ config:
   pulumi:tags:
     value:
       pulumi:template: typescript
-  kubernetes:cluster_name: kubeadm_cluster
+  kubernetes:cluster_name: kubeadm_ec2_cluster
+  kubernetes:vpc_cidr: "10.1.0.0/16"
+  kubernetes:availability_zones: '["eu-west-2a","eu-west-2b"]'
+  k8s_project_version: "1.10"
