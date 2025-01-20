@@ -1,211 +1,224 @@
-# name: Pulumi CI/CD Workflow
+name: Pulumi CI/CD Workflow
 
 # on:
 #   push:
 #     branches: [main]
 
-# jobs:
-#   setup:
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Setup Node.js
-#         uses: actions/setup-node@v2
-#         with:
-#           node-version: "14.x"
-#       - name: Install dependencies
-#         run: npm ci
-#       - name: Install Pulumi
-#         run: npm install -g @pulumi/pulumi
-#       - name: Install Pulumi AWS provider
-#         run: npm install -g @pulumi/aws
-#       - name: Install Ansible
-#         run: |
-#           sudo apt-get update
-#           sudo apt-get install -y ansible
-#       - name: Install Packer
-#         run: |
-#           sudo apt-get update
-#           sudo apt-get install -y packer
-#       - name: Install Python 3
-#         run: |
-#           sudo apt-get update
-#           sudo apt-get install -y python3 python3-pip
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy"
+        required: true
+        default: main
+        type: choice
+        options:
+          - main
+          - develop
+          - release/*
 
-#   deploy:
-#     needs: setup
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Setup Node.js
-#         uses: actions/setup-node@v2
-#         with:
-#           node-version: "14.x"
-#       - name: Install dependencies
-#         run: npm ci
-#       - name: Install Pulumi
-#         run: npm install -g @pulumi/pulumi
-#       - name: Install Pulumi AWS provider
-#         run: npm install -g @pulumi/aws
-#       - name: Deploy to EC2
-#         run: |
-#           pulumi up --yes || { echo "Deployment failed"; exit 1; }
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "20.x"
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Pulumi
+        run: npm install -g @pulumi/pulumi
+      - name: Install Pulumi AWS provider
+        run: npm install -g @pulumi/aws
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+      - name: Install Packer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y packer
+      - name: Install Python 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip
 
-#   destroy:
-#     needs: deploy
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Setup Node.js
-#         uses: actions/setup-node@v2
-#         with:
-#           node-version: "14.x"
-#       - name: Install dependencies
-#         run: npm ci
-#       - name: Install Pulumi
-#         run: npm install -g @pulumi/pulumi
-#       - name: Install Pulumi AWS provider
-#         run: npm install -g @pulumi/aws
-#       - name: Destroy Resources
-#         run: |
-#           pulumi destroy --yes || { echo "Resource destruction failed"; exit 1; }
+  deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "14.x"
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Pulumi
+        run: npm install -g @pulumi/pulumi
+      - name: Install Pulumi AWS provider
+        run: npm install -g @pulumi/aws
+      - name: Deploy to EC2
+        run: |
+          pulumi up --yes || { echo "Deployment failed"; exit 1; }
 
-#   ansible-pulumi-init:
-#     needs: setup
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v1
-#         with:
-#           role-to-assume: ${{ secrets.AWS_ROLE }}
-#           aws-region: ${{ secrets.AWS_REGION }}
-#           role-session-name: GitHub-OIDC-K8S-cluster
-#       - name: Install Ansible collections
-#         run: |
-#           ansible-galaxy collection install community.general
-#           ansible-galaxy collection install cloud.pulumi.aws
-#       - name: Generate inventory
-#         run: |
-#           python3 ${GITHUB_WORKSPACE}/ec2_inventory.py \
-#             Master Worker ${{ secrets.BASTION_PUBLIC_IP }} > ${GITHUB_WORKSPACE}/inventory.json
-#       - name: Validate inventory
-#         run: |
-#           ansible-inventory --list -i ${GITHUB_WORKSPACE}/inventory.json || { echo "Inventory validation failed"; exit 1; }
-#       - name: Copy inventory file
-#         run: |
-#           mkdir -p /tmp/github-run
-#           mv ${GITHUB_WORKSPACE}/inventory.json /tmp/github-run/inventory.json
-#       - name: Set up SSH
-#         run: |
-#           echo "${{ secrets.SSH_PRIVATE_KEY }}" > id_rsa
-#           chmod 400 id_rsa
+  destroy:
+    needs: deploy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "14.x"
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Pulumi
+        run: npm install -g @pulumi/pulumi
+      - name: Install Pulumi AWS provider
+        run: npm install -g @pulumi/aws
+      - name: Destroy Resources
+        run: |
+          pulumi destroy --yes || { echo "Resource destruction failed"; exit 1; }
 
-#   packer-build:
-#     needs: setup
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v1
-#         with:
-#           role-to-assume: ${{ secrets.AWS_ROLE }}
-#           aws-region: ${{ secrets.AWS_REGION }}
-#           role-session-name: GitHub-Packer-K8S-cluster
-#       - name: Build AMI using Packer
-#         run: |
-#           packer build -force \
-#             -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
-#             -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
-#             -var 'aws_region=$AWS_REGION' \
-#             template.json || { echo "AMI building failed"; exit 1; }
+  ansible-pulumi-init:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHub-OIDC-K8S-cluster
+      - name: Install Ansible collections
+        run: |
+          ansible-galaxy collection install community.general
+          ansible-galaxy collection install cloud.pulumi.aws
+      - name: Generate inventory
+        run: |
+          python3 ${GITHUB_WORKSPACE}/ec2_inventory.py \
+            Master Worker ${{ secrets.BASTION_PUBLIC_IP }} > ${GITHUB_WORKSPACE}/inventory.json
+      - name: Validate inventory
+        run: |
+          ansible-inventory --list -i ${GITHUB_WORKSPACE}/inventory.json || { echo "Inventory validation failed"; exit 1; }
+      - name: Copy inventory file
+        run: |
+          mkdir -p /tmp/github-run
+          mv ${GITHUB_WORKSPACE}/inventory.json /tmp/github-run/inventory.json
+      - name: Set up SSH
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > id_rsa
+          chmod 400 id_rsa
 
-#   ansible-deploy:
-#     needs: [deploy, packer-build]
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Configure AWS credentials
-#         uses: aws-actions/configure-aws-credentials@v1
-#         with:
-#           role-to-assume: ${{ secrets.AWS_ROLE }}
-#           aws-region: ${{ secrets.AWS_REGION }}
-#           role-session-name: GitHub-Ansible-K8S-cluster
-#       - name: Install Ansible collections
-#         run: |
-#           ansible-galaxy collection install community.general
-#           ansible-galaxy collection install cloud.pulumi.aws
-#       - name: Validate inventory
-#         run: |
-#           ansible-inventory --list -i /tmp/github-run/inventory.json || { echo "Inventory validation failed"; exit 1; }
-#       - name: Deploy kubeadm cluster using Ansible
-#         run: |
-#           ansible-playbook -i /tmp/github-run/inventory.json playbook.yml || { echo "Ansible deployment failed"; exit 1; }
+  packer-build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHub-Packer-K8S-cluster
+      - name: Build AMI using Packer
+        run: |
+          packer build -force \
+            -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
+            -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
+            -var 'aws_region=$AWS_REGION' \
+            template.json || { echo "AMI building failed"; exit 1; }
 
-#   verify-pulumi-stack:
-#     needs: ansible-deploy
-#     runs-on: ubuntu-latest
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - uses: actions/checkout@v2
-#       - name: Verify Pulumi Stack Output
-#         run: |
-#           pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }}
+  ansible-deploy:
+    needs: [deploy, packer-build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHub-Ansible-K8S-cluster
+      - name: Install Ansible collections
+        run: |
+          ansible-galaxy collection install community.general
+          ansible-galaxy collection install cloud.pulumi.aws
+      - name: Validate inventory
+        run: |
+          ansible-inventory --list -i /tmp/github-run/inventory.json || { echo "Inventory validation failed"; exit 1; }
+      - name: Deploy kubeadm cluster using Ansible
+        run: |
+          ansible-playbook -i /tmp/github-run/inventory.json playbook.yml || { echo "Ansible deployment failed"; exit 1; }
 
-#   failure-notification:
-#     needs:
-#       [ansible-pulumi-init, packer-build, ansible-deploy, verify-pulumi-stack]
-#     runs-on: matrix
-#     strategy:
-#       matrix:
-#         os: [ubuntu-latest, macos-latest]
-#     steps:
-#       - name: Check job status
-#         run: |
-#           if [[ "${{ github.job }}" == "ansible-pulumi-init" ]]; then
-#             echo "Job ansible-pulumi-init failed"
-#           elif [[ "${{ github.job }}" == "packer-build" ]]; then
-#             echo "Job packer-build failed"
-#           elif [[ "${{ github.job }}" == "ansible-deploy" ]]; then
-#             echo "Job ansible-deploy failed"
-#           elif [[ "${{ github.job }}" == "verify-pulumi-stack" ]]; then
-#             echo "Pulumi stack verification failed"
-#           else
-#             echo "Unexpected job failure"
-#           fi
+  verify-pulumi-stack:
+    needs: ansible-deploy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Verify Pulumi Stack Output
+        run: |
+          pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }}
 
-#       - name: Report error
-#         if: always()
-#         run: |
-#           echo "Error occurred in workflow. Check GitHub Actions logs for details."
-#           exit 1
+  failure-notification:
+    needs:
+      [ansible-pulumi-init, packer-build, ansible-deploy, verify-pulumi-stack]
+    runs-on: matrix
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check job status
+        run: |
+          if [[ "${{ github.job }}" == "ansible-pulumi-init" ]]; then
+            echo "Job ansible-pulumi-init failed"
+          elif [[ "${{ github.job }}" == "packer-build" ]]; then
+            echo "Job packer-build failed"
+          elif [[ "${{ github.job }}" == "ansible-deploy" ]]; then
+            echo "Job ansible-deploy failed"
+          elif [[ "${{ github.job }}" == "verify-pulumi-stack" ]]; then
+            echo "Pulumi stack verification failed"
+          else
+            echo "Unexpected job failure"
+          fi
 
-#       # - name: Comment on PR
-#       #   if: github.event_name == 'pull_request' && always()
-#       #   run: |
-#       #     github.rest.create_issue_comment(
-#       #       owner: github.repository_owner,
-#       #       repo: github.repository,
-#       #       issue_number: github.event.issue.number,
-#       #       body: "Error occurred in CI/CD workflow. Please investigate the GitHub Actions logs."
-#       #     )
+      - name: Report error
+        if: always()
+        run: |
+          echo "Error occurred in workflow. Check GitHub Actions logs for details."
+          exit 1
+
+      # - name: Comment on PR
+      #   if: github.event_name == 'pull_request' && always()
+      #   run: |
+      #     github.rest.create_issue_comment(
+      #       owner: github.repository_owner,
+      #       repo: github.repository,
+      #       issue_number: github.event.issue.number,
+      #       body: "Error occurred in CI/CD workflow. Please investigate the GitHub Actions logs."
+      #     )
