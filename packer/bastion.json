@@ -38,7 +38,7 @@
       {
         "type": "shell-local",
         "inline": [
-          "echo 'AMI_ID={{ .Builds.ArtifactID }}' > kubeadm_ami_id.txt"
+          "echo 'AMI_ID={{ .Builds.ArtifactID }}' > bastion_ami_id.txt"
         ]
       }
     ]
