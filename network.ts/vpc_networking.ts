@@ -116,18 +116,5 @@ new aws.ec2.RouteTableAssociation("private-worker-route-table-association", {
 
 
 
-// Bastion Host Instance
-// const bastionHost = new aws.ec2.Instance("bastion-host", {
-//     ami: "ami-0c55b159cbfafe1f0", // Use an appropriate AMI (e.g., Amazon Linux 2 or Ubuntu)
-//     instanceType: "t2.micro", // Adjust instance type as necessary
-//     subnetId: publicSubnetBastion.id,
-//     securityGroups: [bastionSecurityGroup.name],
-//     associatePublicIpAddress: true, // Bastion host needs a public IP
-//     tags: {
-//         Name: `${clusterName}-bastion-host`,
-//     },
-// });
-
 // Export VPC ID and Bastion Host Public IP for later use
 export const vpcId = vpc.id;
-// export const bastionHostPublicIp = bastionHost.publicIp;

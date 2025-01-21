@@ -4,7 +4,7 @@ import * as fs from 'fs/promises';
 
 // Define the assume role policy
 const masterAssumeRole = new aws.iam.Role("master-role", {
-    name: "kubeadm-role",
+    name: "master-role",
     assumeRolePolicy: JSON.stringify({
         Version: "2012-10-17",
         Statement: [{
@@ -17,30 +17,89 @@ const masterAssumeRole = new aws.iam.Role("master-role", {
     }),
 });
 
-// Asynchronous function to create the IAM policy and other resources
+const workerAssumeRole = new aws.iam.Role("worker-role", {
+    name: "worker-role",
+    assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Effect: "Allow",
+            Principal: {
+                Service: "ec2.amazonaws.com"
+            },
+            Action: "sts:AssumeRole"
+        }]
+    }),
+});
+
+const bastionHostAssumeRole = new aws.iam.Role("bastion-host-role", {
+    name: "bastion-host-role",
+    assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Effect: "Allow",
+            Principal: {
+                Service: "ec2.amazonaws.com"
+            },
+            Action: "sts:AssumeRole"
+        }]
+    }),
+});
+
+// Asynchronous function to create the IAM policy and attach it to the corresponding role
 export async function createResources() {
     // Read the contents of the policy file asynchronously
     const policyContent = await fs.readFile("policy.json", "utf-8");
+    const policies = JSON.parse(policyContent);
 
-    // Create the IAM policy resource
-    const policy = new aws.iam.Policy("my-policy", {
-        policy: pulumi.output(policyContent),  // Wrap policy content with pulumi.output
+    // Create the IAM policies for master, worker, and bastion host
+    const masterPolicy = new aws.iam.Policy("master-policy", {
+        policy: pulumi.output(JSON.stringify(policies.masterPolicy)),
     });
 
-    // Attach policy to the role
-    const rolePolicyAttachment = new aws.iam.PolicyAttachment("my-role-policyattachment", {
-        policyArn: policy.arn,
+    const workerPolicy = new aws.iam.Policy("worker-policy", {
+        policy: pulumi.output(JSON.stringify(policies.workerPolicy)),
+    });
+
+    const bastionHostPolicy = new aws.iam.Policy("bastion-policy", {
+        policy: pulumi.output(JSON.stringify(policies.bastionHostPolicy)),
+    });
+
+    // Attach the respective policies to the roles
+    const masterRolePolicyAttachment = new aws.iam.PolicyAttachment("master-role-policyattachment", {
+        policyArn: masterPolicy.arn,
         roles: [masterAssumeRole.name],
     });
 
-    // Create the instance profile
-    const instanceProfile = new aws.iam.InstanceProfile("my-instance-profile", {
+    const workerRolePolicyAttachment = new aws.iam.PolicyAttachment("worker-role-policyattachment", {
+        policyArn: workerPolicy.arn,
+        roles: [workerAssumeRole.name],
+    });
+
+    const bastionHostRolePolicyAttachment = new aws.iam.PolicyAttachment("bastion-role-policyattachment", {
+        policyArn: bastionHostPolicy.arn,
+        roles: [bastionHostAssumeRole.name],
+    });
+
+    // Create instance profiles for each role
+    const masterInstanceProfile = new aws.iam.InstanceProfile("master-instance-profile", {
         role: masterAssumeRole.name,
     });
 
-    // Return the instanceProfile so it can be imported
-    return instanceProfile;
+    const workerInstanceProfile = new aws.iam.InstanceProfile("worker-instance-profile", {
+        role: workerAssumeRole.name,
+    });
+
+    const bastionHostInstanceProfile = new aws.iam.InstanceProfile("bastion-instance-profile", {
+        role: bastionHostAssumeRole.name,
+    });
+
+    // Return the instance profiles so they can be exported
+    return {
+        masterInstanceProfile,
+        workerInstanceProfile,
+        bastionHostInstanceProfile
+    };
 }
 
-// Export the instanceProfile, since it's a Pulumi resource
-export const instanceProfile = createResources().then(profile => profile);
+// Call the async function and export the instance profiles
+export const instanceProfiles = createResources().then(resources => resources);

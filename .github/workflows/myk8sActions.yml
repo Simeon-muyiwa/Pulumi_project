@@ -20,29 +20,34 @@ on:
 jobs:
   setup:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
       - name: Setup Node.js
-        uses: actions/setup-node@v2
+        uses: ./.github/actions/setup-node@v3
         with:
           node-version: "20.x"
-      - name: Install dependencies
+
+      - name: Install Dependencies
         run: npm ci
+
       - name: Install Pulumi
         run: npm install -g @pulumi/pulumi
+
       - name: Install Pulumi AWS provider
         run: npm install -g @pulumi/aws
+
       - name: Install Ansible
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible
+
       - name: Install Packer
         run: |
           sudo apt-get update
           sudo apt-get install -y packer
+
       - name: Install Python 3
         run: |
           sudo apt-get update
@@ -51,21 +56,8 @@ jobs:
   deploy:
     needs: setup
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
-      - name: Setup Node.js
-        uses: actions/setup-node@v2
-        with:
-          node-version: "14.x"
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Pulumi
-        run: npm install -g @pulumi/pulumi
-      - name: Install Pulumi AWS provider
-        run: npm install -g @pulumi/aws
+      - uses: ./.github/actions/setup-node@v3
       - name: Deploy to EC2
         run: |
           pulumi up --yes || { echo "Deployment failed"; exit 1; }
@@ -73,21 +65,8 @@ jobs:
   destroy:
     needs: deploy
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
-      - name: Setup Node.js
-        uses: actions/setup-node@v2
-        with:
-          node-version: "14.x"
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Pulumi
-        run: npm install -g @pulumi/pulumi
-      - name: Install Pulumi AWS provider
-        run: npm install -g @pulumi/aws
+      - uses: ./.github/actions/setup-node@v3
       - name: Destroy Resources
         run: |
           pulumi destroy --yes || { echo "Resource destruction failed"; exit 1; }
@@ -95,11 +74,8 @@ jobs:
   ansible-pulumi-init:
     needs: setup
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
+      - uses: ./.github/actions/setup-node@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
@@ -121,19 +97,12 @@ jobs:
         run: |
           mkdir -p /tmp/github-run
           mv ${GITHUB_WORKSPACE}/inventory.json /tmp/github-run/inventory.json
-      - name: Set up SSH
-        run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > id_rsa
-          chmod 400 id_rsa
 
   packer-build:
     needs: setup
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
+      - uses: ./.github/actions/setup-node@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
@@ -151,11 +120,8 @@ jobs:
   ansible-deploy:
     needs: [deploy, packer-build]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
+      - uses: ./.github/actions/setup-node@v3
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
@@ -176,49 +142,8 @@ jobs:
   verify-pulumi-stack:
     needs: ansible-deploy
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v2
+      - uses: ./.github/actions/setup-node@v3
       - name: Verify Pulumi Stack Output
         run: |
           pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }}
-
-  failure-notification:
-    needs:
-      [ansible-pulumi-init, packer-build, ansible-deploy, verify-pulumi-stack]
-    runs-on: matrix
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - name: Check job status
-        run: |
-          if [[ "${{ github.job }}" == "ansible-pulumi-init" ]]; then
-            echo "Job ansible-pulumi-init failed"
-          elif [[ "${{ github.job }}" == "packer-build" ]]; then
-            echo "Job packer-build failed"
-          elif [[ "${{ github.job }}" == "ansible-deploy" ]]; then
-            echo "Job ansible-deploy failed"
-          elif [[ "${{ github.job }}" == "verify-pulumi-stack" ]]; then
-            echo "Pulumi stack verification failed"
-          else
-            echo "Unexpected job failure"
-          fi
-
-      - name: Report error
-        if: always()
-        run: |
-          echo "Error occurred in workflow. Check GitHub Actions logs for details."
-          exit 1
-
-      # - name: Comment on PR
-      #   if: github.event_name == 'pull_request' && always()
-      #   run: |
-      #     github.rest.create_issue_comment(
-      #       owner: github.repository_owner,
-      #       repo: github.repository,
-      #       issue_number: github.event.issue.number,
-      #       body: "Error occurred in CI/CD workflow. Please investigate the GitHub Actions logs."
-      #     )

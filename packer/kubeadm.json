@@ -33,5 +33,13 @@
         "type": "ansible",
         "playbook_file": "../ansible/common_kubeadm.yaml"
       }
+    ],
+    "post-processors": [
+      {
+        "type": "shell-local",
+        "inline": [
+          "echo 'AMI_ID={{ .Builds.ArtifactID }}' > kubeadm_ami_id.txt"
+        ]
+      }
     ]
   }

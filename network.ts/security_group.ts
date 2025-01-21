@@ -49,23 +49,48 @@ new aws.ec2.SecurityGroupRule("workerNodeKubeletIngress", {
     sourceSecurityGroupId: masterSecurityGroup.id, // Allow communication from master nodes
 });
 
-// Bastion Host Security Group
-export const bastionSecurityGroup = new aws.ec2.SecurityGroup("bastion-sg", {
+// Create security group for bastion host
+export const bastionSecurityGroup = new aws.ec2.SecurityGroup("bastionSecurityGroup", {
     vpcId: vpcId,
-    ingress: [
-        {
-            fromPort: 22,
-            toPort: 22,
-            protocol: "tcp",
-            cidrBlocks: ["0.0.0.0/0"],  // Allow SSH from anywhere (adjust as needed)
-        },
-    ],
-    egress: [
-        {
-            fromPort: 0,
-            toPort: 0,
-            protocol: "-1", // Allow all egress traffic
-            cidrBlocks: ["0.0.0.0/0"],
-        },
-    ],
+    description: "Security group for bastion host",
+});
+
+// Add ingress rule for SSH access to bastion host
+new aws.ec2.SecurityGroupRule("bastionSshIngress", {
+    type: "ingress",
+    fromPort: 22,
+    toPort: 22,
+    protocol: "tcp",
+    securityGroupId: bastionSecurityGroup.id,
+    cidrBlocks: ["0.0.0.0/0"], // Allow SSH access from anywhere
+});
+
+// Add egress rule for bastion host
+new aws.ec2.SecurityGroupRule("bastionEgress", {
+    type: "egress",
+    fromPort: 0,
+    toPort: 0,
+    protocol: "-1",
+    securityGroupId: bastionSecurityGroup.id,
+    cidrBlocks: ["0.0.0.0/0"], // Allow all outbound traffic
+});
+
+// Update masterSecurityGroup to allow SSH access from bastion host
+new aws.ec2.SecurityGroupRule("masterBastionSshIngress", {
+    type: "ingress",
+    fromPort: 22,
+    toPort: 22,
+    protocol: "tcp",
+    securityGroupId: masterSecurityGroup.id,
+    sourceSecurityGroupId: bastionSecurityGroup.id,
+});
+
+// Update workerSecurityGroup to allow SSH access from bastion host
+new aws.ec2.SecurityGroupRule("workerBastionSshIngress", {
+    type: "ingress",
+    fromPort: 22,
+    toPort: 22,
+    protocol: "tcp",
+    securityGroupId: workerSecurityGroup.id,
+    sourceSecurityGroupId: bastionSecurityGroup.id,
 });

@@ -1,4 +1,14 @@
 import * as aws from "@pulumi/aws";
+import * as pulumi from "@pulumi/pulumi";
+
+import * as fs from "fs";
+import * as path from "path";
+
+const config = new pulumi.Config("myproject");
+
+const clusterName = config.get("cluster_name") || "kubeadm-cluster";
+
+const amiId = fs.readFileSync(path.join(__dirname, "kubeadm_ami_id.txt"), "utf8").trim();
 
 import { workerSecurityGroup } from "../network.ts/security_group";
 import { privateSubnetWorker } from "../network.ts/vpc_networking";
@@ -9,7 +19,7 @@ const workerInstanceProfile = (await instanceProfiles).workerInstanceProfile.nam
 
 // Create a launch template for the worker instances
 const workerLaunchTemplate = new aws.ec2.LaunchTemplate("worker-launch-template", {
-    imageId: "ami-12345678", // Replace with your desired AMI ID
+    imageId:amiId,
     iamInstanceProfile: {
         arn: workerInstanceProfile,
     },
@@ -21,6 +31,7 @@ const workerLaunchTemplate = new aws.ec2.LaunchTemplate("worker-launch-template"
 
     tags: {
         Name: "kubernetes-worker",
+        [`kubernetes.io/cluster/${clusterName}`]: "shared",
         Role: "Worker",
         Environment: "kubernetes", // Optional environment tag
     },

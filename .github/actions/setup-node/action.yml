@@ -1,0 +1,17 @@
+name: Setup Node.js
+description: Sets up Node.js version
+inputs:
+  node-version:
+    description: Node.js version to install
+    default: "20.x"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v3
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ inputs.node-version }}
