@@ -14,12 +14,22 @@ const clusterName = config.get("cluster_name") || "kubeadm-cluster";
 // Read the AMI ID from the file (ensure the file path is correct)
 const amiId = fs.readFileSync(path.join(__dirname, "bastion_ami_id.txt"), "utf8").trim();
 
+// example - pulumi config set --secret sshPublicKey "ssh-rsa t2ta6F6fmX0agvpFy"
+const publicKey = config.requireSecret("sshPublicKey");
+
+// Create EC2 Key Pair
+const deployer = new aws.ec2.KeyPair("deployer", {
+    keyName: "deployer-key",
+    publicKey: publicKey,
+});
+
 // Bastion Host Instance
-const bastionHost = new aws.ec2.Instance("bastion-host", {
+export const bastionHost = new aws.ec2.Instance("bastion-host", {
     ami: amiId, 
     instanceType: "t2.micro", // Adjust instance type as necessary
     iamInstanceProfile: (await instanceProfiles).bastionHostInstanceProfile.name,
     subnetId: publicSubnetBastion.id,
+    keyName: deployer.keyName,
     securityGroups: [bastionSecurityGroup.name],
     associatePublicIpAddress: true, // Bastion host needs a public IP
     tags: {

@@ -1,9 +1,5 @@
 name: Pulumi CI/CD Workflow
 
-# on:
-#   push:
-#     branches: [main]
-
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +21,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Setup Node.js
-        uses: ./.github/actions/setup-node@v3
+        uses: actions/setup-node@v3
         with:
           node-version: "20.x"
 
@@ -35,7 +31,7 @@ jobs:
       - name: Install Pulumi
         run: npm install -g @pulumi/pulumi
 
-      - name: Install Pulumi AWS provider
+      - name: Install AWS provider
         run: npm install -g @pulumi/aws
 
       - name: Install Ansible
@@ -53,52 +49,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3 python3-pip
 
-  deploy:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Deploy to EC2
-        run: |
-          pulumi up --yes || { echo "Deployment failed"; exit 1; }
-
-  destroy:
-    needs: deploy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Destroy Resources
-        run: |
-          pulumi destroy --yes || { echo "Resource destruction failed"; exit 1; }
-
-  ansible-pulumi-init:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-session-name: GitHub-OIDC-K8S-cluster
-      - name: Install Ansible collections
-        run: |
-          ansible-galaxy collection install community.general
-          ansible-galaxy collection install cloud.pulumi.aws
-      - name: Generate inventory
-        run: |
-          python3 ${GITHUB_WORKSPACE}/ec2_inventory.py \
-            Master Worker ${{ secrets.BASTION_PUBLIC_IP }} > ${GITHUB_WORKSPACE}/inventory.json
-      - name: Validate inventory
-        run: |
-          ansible-inventory --list -i ${GITHUB_WORKSPACE}/inventory.json || { echo "Inventory validation failed"; exit 1; }
-      - name: Copy inventory file
-        run: |
-          mkdir -p /tmp/github-run
-          mv ${GITHUB_WORKSPACE}/inventory.json /tmp/github-run/inventory.json
-
-  packer-build:
+  packer-build-master-worker:
     needs: setup
     runs-on: ubuntu-latest
     steps:
@@ -109,16 +60,16 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: GitHub-Packer-K8S-cluster
-      - name: Build AMI using Packer
+      - name: Build Master/Worker AMI
         run: |
           packer build -force \
             -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
             -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
             -var 'aws_region=$AWS_REGION' \
-            template.json || { echo "AMI building failed"; exit 1; }
+            common.kubeadm.json || { echo "Master/Worker AMI building failed"; exit 1; }
 
-  ansible-deploy:
-    needs: [deploy, packer-build]
+  bastion-packer-build:
+    needs: [pulumi-deploy, packer-build-master-worker]
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/setup-node@v3
@@ -127,17 +78,45 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE }}
           aws-region: ${{ secrets.AWS_REGION }}
-          role-session-name: GitHub-Ansible-K8S-cluster
-      - name: Install Ansible collections
+          role-session-name: GitHub-Bastion-Packer
+      - name: Build Bastion AMI
         run: |
-          ansible-galaxy collection install community.general
-          ansible-galaxy collection install cloud.pulumi.aws
-      - name: Validate inventory
+          packer build -force \
+            -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
+            -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
+            -var 'aws_region=$AWS_REGION' \
+            bastion.json || { echo "Bastion AMI building failed"; exit 1; }
+
+  pulumi-deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup-node@v3
+      - name: Deploy to EC2
         run: |
-          ansible-inventory --list -i /tmp/github-run/inventory.json || { echo "Inventory validation failed"; exit 1; }
+          pulumi up --yes || { echo "Deployment failed"; exit 1; }
+
+  dynamic-inventory:
+    needs: pulumi-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup-node@v3
+      - name: Generate Dynamic Inventory
+        run: |
+          python3 ${GITHUB_WORKSPACE}/dynamic_inventory.py \
+            ${{ secrets.MASTER_TAG }} \
+            ${{ secrets.WORKER_TAG }} \
+            ${{ secrets.BASTION_PUBLIC_IP }} > ${GITHUB_WORKSPACE}/inventory.json
+          cat inventory.json
+
+  ansible-deploy:
+    needs: [pulumi-deploy, dynamic-inventory]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup-node@v3
       - name: Deploy kubeadm cluster using Ansible
         run: |
-          ansible-playbook -i /tmp/github-run/inventory.json playbook.yml || { echo "Ansible deployment failed"; exit 1; }
+          ansible-playbook -i inventory.json playbook.yml || { echo "Ansible deployment failed"; exit 1; }
 
   verify-pulumi-stack:
     needs: ansible-deploy
@@ -146,4 +125,4 @@ jobs:
       - uses: ./.github/actions/setup-node@v3
       - name: Verify Pulumi Stack Output
         run: |
-          pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }}
+          pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }} || { echo "Pulumi stack verification failed"; exit 1; }
