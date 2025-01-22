@@ -21,14 +21,14 @@
   "provisioners": [
     {
       "type": "ansible",
-      "playbook_file": "../ansible/kubeadm/templates/bastion.yaml"
+      "playbook_file": "../ansible/kubeadm/templates/common_kubeadm.yaml"
     }
   ],
   "post-processors": [
     {
       "type": "shell-local",
       "inline": [
-        "echo 'AMI_ID={{ .Builds.ArtifactID }}' > bastion_ami_id.txt"
+        "echo 'AMI_ID={{ .Builds.ArtifactID }}' > kubeadm_ami_id.txt"
       ]
     }
   ]
