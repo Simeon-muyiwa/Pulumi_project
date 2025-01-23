@@ -116,7 +116,7 @@ jobs:
       - uses: ./.github/actions/setup-node@v3
       - name: Deploy kubeadm cluster using Ansible
         run: |
-          ansible-playbook -i inventory.json playbook.yml || { echo "Ansible deployment failed"; exit 1; }
+          ansible-playbook -i inventory.json ansible/playbook.yml || { echo "Ansible deployment failed"; exit 1; }
 
   verify-pulumi-stack:
     needs: ansible-deploy
