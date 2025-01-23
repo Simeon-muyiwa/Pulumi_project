@@ -6,7 +6,7 @@ import * as path from "path";
 
 import { privateSubnetMaster } from "../network.ts/vpc_networking";
 import { masterSecurityGroup } from "../network.ts/security_group"
-import { instanceProfiles } from "../network.ts/iam_instance";
+import { resourceSetup } from "../network.ts/iam_instance"
 
 const config = new pulumi.Config("myproject");
 
@@ -33,7 +33,7 @@ async function createInstance(role: string): Promise<aws.ec2.Instance> {
         ami: amiId,  
         securityGroups: [masterSecurityGroup.name],  // Reference security group
         subnetId: privateSubnetMaster.id,
-        iamInstanceProfile: (await instanceProfiles).masterInstanceProfile.name,
+        iamInstanceProfile: (await resourceSetup).masterInstanceProfile,
         keyName: deployer.keyName,
         tags: {
             Name: `kubernetes-${role}`,

@@ -6,7 +6,7 @@ import * as path from "path";
 
 import { publicSubnetBastion } from "../network.ts/vpc_networking";
 import { bastionSecurityGroup} from "../network.ts/security_group"
-import { instanceProfiles } from "../network.ts/iam_instance";
+import { resourceSetup } from "../network.ts/iam_instance"
 
 const config = new pulumi.Config("myproject");
 
@@ -27,7 +27,7 @@ const deployer = new aws.ec2.KeyPair("deployer", {
 export const bastionHost = new aws.ec2.Instance("bastion-host", {
     ami: amiId, 
     instanceType: "t2.micro", // Adjust instance type as necessary
-    iamInstanceProfile: (await instanceProfiles).bastionHostInstanceProfile.name,
+    iamInstanceProfile: ( await resourceSetup).bastionHostInstanceProfile,
     subnetId: publicSubnetBastion.id,
     keyName: deployer.keyName,
     securityGroups: [bastionSecurityGroup.name],

@@ -46,38 +46,41 @@ const bastionHostAssumeRole = new aws.iam.Role("bastion-host-role", {
 });
 
 // Asynchronous function to create the IAM policy and attach it to the corresponding role
-export async function createResources() {
+async function createResources() {
     // Read the contents of the policy file asynchronously
     const policyContent = await fs.readFile("policy.json", "utf-8");
     const policies = JSON.parse(policyContent);
 
     // Create the IAM policies for master, worker, and bastion host
     const masterPolicy = new aws.iam.Policy("master-policy", {
+        name: "master-policy",
         policy: pulumi.output(JSON.stringify(policies.masterPolicy)),
     });
 
     const workerPolicy = new aws.iam.Policy("worker-policy", {
+        name: "worker-policy",
         policy: pulumi.output(JSON.stringify(policies.workerPolicy)),
     });
 
     const bastionHostPolicy = new aws.iam.Policy("bastion-policy", {
+        name: "bastion-policy",
         policy: pulumi.output(JSON.stringify(policies.bastionHostPolicy)),
     });
 
     // Attach the respective policies to the roles
-    const masterRolePolicyAttachment = new aws.iam.PolicyAttachment("master-role-policyattachment", {
+    const masterRolePolicyAttachment = new aws.iam.RolePolicyAttachment("master-role-policyattachment", {
+        role: masterAssumeRole.name,
         policyArn: masterPolicy.arn,
-        roles: [masterAssumeRole.name],
     });
 
-    const workerRolePolicyAttachment = new aws.iam.PolicyAttachment("worker-role-policyattachment", {
+    const workerRolePolicyAttachment = new aws.iam.RolePolicyAttachment("worker-role-policyattachment", {
+        role: workerAssumeRole.name,
         policyArn: workerPolicy.arn,
-        roles: [workerAssumeRole.name],
     });
 
-    const bastionHostRolePolicyAttachment = new aws.iam.PolicyAttachment("bastion-role-policyattachment", {
+    const bastionHostRolePolicyAttachment = new aws.iam.RolePolicyAttachment("bastion-role-policyattachment", {
+        role: bastionHostAssumeRole.name,
         policyArn: bastionHostPolicy.arn,
-        roles: [bastionHostAssumeRole.name],
     });
 
     // Create instance profiles for each role
@@ -102,4 +105,4 @@ export async function createResources() {
 }
 
 // Call the async function and export the instance profiles
-export const instanceProfiles = createResources().then(resources => resources);
+export const resourceSetup = createResources();
