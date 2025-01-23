@@ -10,7 +10,7 @@ class Ec2Inventory:
         self.bastion_public_ip = bastion_public_ip
         self.common_args = f"-o ProxyCommand='ssh -W %h:%p {self.bastion_public_ip}'"
         self.ec2_client = boto3.client('ec2', region_name='eu-west-2')  # Adjust region if needed
-        self.asg_client = boto3.client('autoscaling', region_name='us-west-2')
+        self.asg_client = boto3.client('autoscaling', region_name='eu-west-2')
 
     def get_inventory(self) -> Dict[str, Dict[str, Any]]:
         inventory = {}

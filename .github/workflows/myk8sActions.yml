@@ -66,7 +66,7 @@ jobs:
             -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
             -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
             -var 'aws_region=$AWS_REGION' \
-            common.kubeadm.json || { echo "Master/Worker AMI building failed"; exit 1; }
+            kubeadm.json || { echo "Master/Worker AMI building failed"; exit 1; }
 
   bastion-packer-build:
     needs: [pulumi-deploy, packer-build-master-worker]

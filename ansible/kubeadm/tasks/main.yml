@@ -1,3 +1,20 @@
 #SPDX-License-Identifier: MIT-0
 ---
 # tasks file for kubeadm
+- name: Apply Common Kubeadm Config Template
+  ansible.builtin.template:
+    src: kubeadm/templates/kubeadm-config.yaml
+    dest: /etc/kubernetes/kubeadm-config.yaml
+    mode: "0644"
+
+- name: Apply Master Template
+  ansible.builtin.template:
+    src: kubeadm/templates/master.yml
+    dest: /etc/kubernetes/master.yml
+    mode: "0644"
+
+- name: Apply Worker Template
+  ansible.builtin.template:
+    src: kubeadm/templates/worker.yml
+    dest: /etc/kubernetes/worker.yml
+    mode: "0644"
