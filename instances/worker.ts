@@ -4,9 +4,10 @@ import * as pulumi from "@pulumi/pulumi";
 import * as fs from "fs";
 import * as path from "path";
 
-import { workerSecurityGroup } from "../network.ts/security_group";
-import { privateSubnetWorker } from "../network.ts/vpc_networking";
-import { resourceSetup } from "../network.ts/iam_instance"
+import { workerSecurityGroup } from "../network/security_group";
+import { privateSubnetWorker } from "../network/vpc_networking";
+import { resourceSetup } from "../network/iam_instance";
+import * as keyPair from "../network/key_pairs"; 
 
 const config = new pulumi.Config("myproject");
 
@@ -15,13 +16,7 @@ const clusterName = config.get("cluster_name") || "kubeadm-cluster";
 const amiId = fs.readFileSync(path.join(__dirname, "kubeadm_ami_id.txt"), "utf8").trim();
 
 const Profile = (await resourceSetup).workerInstanceProfile.arn
-const publicKey = config.requireSecret("sshPublicKey");
 
-// Create EC2 Key Pair
-const deployer = new aws.ec2.KeyPair("deployer", {
-    keyName: "deployer-key",
-    publicKey: publicKey,
-});
 
 // Create a launch template for the worker instances
 const workerLaunchTemplate = new aws.ec2.LaunchTemplate("worker-launch-template", {
@@ -31,7 +26,7 @@ const workerLaunchTemplate = new aws.ec2.LaunchTemplate("worker-launch-template"
     },
     instanceType: "t3.medium", 
     securityGroupNames: [workerSecurityGroup.name], 
-    keyName: deployer.keyName,
+    keyName: keyPair.deployer.keyName,
     networkInterfaces: [{
         subnetId: privateSubnetWorker.id, 
     }],
