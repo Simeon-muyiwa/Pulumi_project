@@ -1,11 +1,57 @@
-- hosts: workers
+---
+- name: Worker Node Configuration
+  hosts: workers
   become: yes
+  serial: 1
   tasks:
     - name: Enable TCP port 6443 (On Master) is able to connect from Worker
-      wait_for: "host=YOUR_MASTER_IP port=6443 timeout=1"
+      wait_for:
+        host: "{{ hostvars['master'].ansible_host }}"
+        port: 6443
+        timeout: 60
+      register: api_connect_result
+      failed_when: api_connect_result is failed
+      ignore_errors: true
+
+    - name: Handle API Connect Failure
+      debug:
+        msg: "Failed to connect to master API. Please check the master node."
+      when: api_connect_result is failed
 
     - name: Join worker to cluster
-      shell: "{{ hostvars['YOUR_MASTER_IP'].join_command }} >> node_joined.log"
+      shell: "{{ hostvars['master'].join_command }} >> node_joined.log"
       args:
-        chdir: /home/YOUR_USERPROFILE_NAME
+        chdir: /home/{{ ansible_user }}
         creates: node_joined.log
+      register: join_result
+      failed_when: join_result.rc != 0
+      ignore_errors: true
+
+    - name: Handle Join Failure
+      debug:
+        msg: "Worker failed to join the cluster. Check logs for details."
+      when: join_result is failed
+
+    - name: Verify Worker Status
+      shell: kubectl get nodes
+      register: node_status
+      failed_when: "'NotReady' in node_status.stdout"
+      changed_when: false
+
+    - name: Handle Not Ready State
+      debug:
+        msg: "Worker is in NotReady state. Please investigate."
+      when: node_status is failed
+
+    - name: Clean Up Logs
+      file:
+        path: /home/{{ ansible_user }}/node_joined.log
+        state: absent
+      when: node_status is failed
+
+    - name: Restart Kubernetes Services
+      systemd:
+        name: kubelet
+        state: restarted
+        enabled: yes
+      when: node_status is failed
