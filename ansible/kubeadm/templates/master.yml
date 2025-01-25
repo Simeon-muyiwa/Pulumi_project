@@ -54,45 +54,65 @@
         creates: pod_network_setup.log
 
     - name: Configure Firewall
+  block:
+    - name: Check if ufw is installed
+      stat:
+        path: /usr/sbin/ufw
+      register: ufw_installed
+      ignore_errors: yes
+
+    - name: Install ufw if not present
+      apt:
+        name: ufw
+        state: present
+      when: not ufw_installed.stat.exists
+
+    - name: Open ports for API Server
+      when: ufw_installed.stat.exists
       block:
-        - name: Check firewall type
-          stat:
-            path: /usr/bin/firewall-cmd
-          register: firewalld_installed
-          ignore_errors: yes
+        - name: Add API server port
+          ufw:
+            rule: allow
+            name: "API Server"
+            port: "{{ api_server_port }}"
+            proto: tcp
+        - name: Enable ufw
+          ufw:
+            state: enabled
 
-        - name: Open ports for API Server
-          when: firewalld_installed.stat.exists
-          block:
-            - name: Add API server port
-              shell: "firewall-cmd --add-port={{ api_server_port }}/tcp --permanent"
-              ignore_errors: yes
-            - name: Reload firewall
-              shell: "firewall-cmd --reload"
-              ignore_errors: yes
+    - name: Open ports for Etcd
+      when: ufw_installed.stat.exists
+      block:
+        - name: Add Etcd client port
+          ufw:
+            rule: allow
+            name: "Etcd Client"
+            port: "{{ etcd_client_port }}"
+            proto: tcp
+        - name: Add Etcd server port
+          ufw:
+            rule: allow
+            name: "Etcd Server"
+            port: "{{ etcd_server_port }}"
+            proto: tcp
 
-        - name: Open ports for Etcd
-          when: firewalld_installed.stat.exists
-          block:
-            - name: Add Etcd client port
-              shell: "firewall-cmd --add-port={{ etcd_client_port }}/tcp --permanent"
-              ignore_errors: yes
-            - name: Add Etcd server port
-              shell: "firewall-cmd --add-port={{ etcd_server_port }}/tcp --permanent"
-              ignore_errors: yes
-            - name: Reload firewall
-              shell: "firewall-cmd --reload"
-              ignore_errors: yes
+    - name: Open ports for Kubelet
+      when: ufw_installed.stat.exists
+      block:
+        - name: Add Kubelet port
+          ufw:
+            rule: allow
+            name: "Kubelet"
+            port: "{{ kubelet_port }}"
+            proto: tcp
 
-        - name: Open ports for Kubelet
-          when: firewalld_installed.stat.exists
-          block:
-            - name: Add Kubelet port
-              shell: "firewall-cmd --add-port={{ kubelet_port }}/tcp --permanent"
-              ignore_errors: yes
-            - name: Reload firewall
-              shell: "firewall-cmd --reload"
-              ignore_errors: yes
+    - name: Verify ufw status
+      command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    - debug:
+        var: ufw_status.stdout
 
     - name: Set up Bash Completion
       become: no
