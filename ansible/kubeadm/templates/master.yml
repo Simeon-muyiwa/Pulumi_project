@@ -3,7 +3,6 @@
   hosts: master
   become: yes
   vars:
-    shared_directory: /tmp/kubeadm_shared
     kubectl_version: "1.29.*"
     pod_network: "10.244.0.0/16"
     api_server_port: 6443
