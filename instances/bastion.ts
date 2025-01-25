@@ -29,7 +29,7 @@ export const bastionHost = new aws.ec2.Instance("bastion-host", {
     tags: {
         Name: `${clusterName}-bastion-host`,
         [`kubernetes.io/cluster/${clusterName}`]: "shared",
-        Role: "Worker",
+        Role: "Bastion",
     },
 });
 

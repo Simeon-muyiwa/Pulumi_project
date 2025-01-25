@@ -16,7 +16,6 @@
       apt:
         name: kubectl={{ kubectl_version }}
         state: present
-        force: yes
 
     - name: Create Kubeadm Config File
       copy:
@@ -52,7 +51,7 @@
       shell: |
         kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.log
       args:
-        chdir: $HOME
+        chdir: /home/{{ ansible_user }}
         creates: pod_network_setup.log
 
     - name: Configure Firewall
