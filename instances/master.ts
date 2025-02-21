@@ -1,38 +1,51 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
-
 import * as fs from "fs";
 import * as path from "path";
-
-import { privateSubnetMaster } from "../network/vpc_networking";
-import { masterSecurityGroup } from "../network/security_group"
-import { resourceSetup } from "../network/iam_instance"
-import * as keyPair from "../network/key_pairs"; 
+import { networkOutputs } from "../network/vpc_networking";
+import { securityGroupIds } from "../network/security_group";
+import { resourceSetup } from "../network/iam_instance";
+import * as keyPair from "../network/key_pairs";
 
 const config = new pulumi.Config("myproject");
+const clusterName = config.require("cluster_name");
 
-const clusterName = config.get("cluster_name") || "kubeadm-cluster";
+// Get AMI ID from file
+const amiId = pulumi.output(fs.promises.readFile(path.join(__dirname, "kubeadm_ami_id.txt"), "utf8"))
+    .apply(amiId => amiId.trim());
 
-const amiId = fs.readFileSync(path.join(__dirname, "kubeadm_ami_id.txt"), "utf8").trim();
+// Single master instance
+const masterNode = new aws.ec2.Instance("master-node", {
+  instanceType: "t3.medium",
+  ami: amiId,
+  subnetId: pulumi.all(networkOutputs.privateSubnetIds).apply(
+      (subnets: string[]) => subnets[0]
+  ),
+  vpcSecurityGroupIds: [securityGroupIds.master],
+  iamInstanceProfile: pulumi.output(resourceSetup).apply(res => 
+      res.masterInstanceProfile.name
+  ),
+  keyName: keyPair.deployer.keyName,
+  tags: {
+      Name: pulumi.interpolate`${clusterName}-master`,
+      [`kubernetes.io/cluster/${clusterName}`]: "shared",
+      Role: "master",
+      Environment: "production",
+  },
+  rootBlockDevice: {
+      volumeSize: 50,
+      volumeType: "gp3",
+  },
+});
 
-
-// Define the base instance configuration for both master and worker nodes
-async function createInstance(role: string): Promise<aws.ec2.Instance> {
-    return new aws.ec2.Instance(`kubernetes-${role}-node`, {
-        instanceType: "t3.medium",  
-        ami: amiId,
-        securityGroups: [masterSecurityGroup.name],  // Reference security group
-        subnetId: privateSubnetMaster.id,
-        iamInstanceProfile: (await resourceSetup).masterInstanceProfile,
-        keyName: keyPair.deployer.keyName,
-        tags: {
-            Name: `kubernetes-${role}`,
-            [`kubernetes.io/cluster/${clusterName}`]: "shared",
-            Role: role,
-            Environment: "kubernetes", // Optional environment tag
-        },
-    });
-}
-
- export { createInstance  as masterInstance };
-
+// Export critical information
+// In master.ts
+export const masterResources = {
+  instance: masterNode,  // The actual Instance resource
+  details: pulumi.all({
+      id: masterNode.id,
+      privateIp: masterNode.privateIp,
+      publicIp: masterNode.publicIp
+  }),
+  sshCommand: pulumi.interpolate`ssh -i ${keyPair.deployer.keyName}.pem ubuntu@${masterNode.publicIp}`
+};

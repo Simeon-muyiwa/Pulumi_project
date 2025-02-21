@@ -1,5 +1,4 @@
 name: Pulumi CI/CD Workflow
-
 on:
   workflow_dispatch:
     inputs:
@@ -17,21 +16,33 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Setup Node.js
+      - name: Set Up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: "20.x"
 
+      - name: Cache node_modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
       - name: Install Dependencies
         run: npm ci
 
-      - name: Install Pulumi
+      - name: Install Pulumi CLI
         run: npm install -g @pulumi/pulumi
 
-      - name: Install AWS provider
+      - name: Cache Pulumi Plugins
+        uses: actions/cache@v3
+        with:
+          path: ~/.pulumi/plugins
+          key: ${{ runner.os }}-pulumi-plugins
+
+      - name: Install AWS Provider for Pulumi
         run: npm install -g @pulumi/aws
 
       - name: Install Ansible
@@ -53,76 +64,189 @@ jobs:
     needs: setup
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Configure AWS credentials
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deployer_key
+          chmod 600 ~/.ssh/deployer_key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Configure AWS Credentials for Packer
         uses: aws-actions/configure-aws-credentials@v1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: eu-west-2
           role-session-name: GitHub-Packer-K8S-cluster
+
       - name: Build Master/Worker AMI
         run: |
-          packer build -force \
-            -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
-            -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
-            -var 'aws_region=$AWS_REGION' \
-            kubeadm.json || { echo "Master/Worker AMI building failed"; exit 1; }
+          packer build -force kubeadm.json || { echo "Master/Worker AMI building failed"; exit 1; }
 
   bastion-packer-build:
-    needs: [pulumi-deploy, packer-build-master-worker]
+    needs: packer-build-master-worker
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Configure AWS credentials
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deployer_key
+          chmod 600 ~/.ssh/deployer_key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Configure AWS Credentials for Packer
         uses: aws-actions/configure-aws-credentials@v1
         with:
           role-to-assume: ${{ secrets.AWS_ROLE }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: eu-west-2
           role-session-name: GitHub-Bastion-Packer
+
       - name: Build Bastion AMI
         run: |
-          packer build -force \
-            -var 'aws_access_key_id=$AWS_ACCESS_KEY_ID' \
-            -var 'aws_secret_access_key=$AWS_SECRET_ACCESS_KEY' \
-            -var 'aws_region=$AWS_REGION' \
-            bastion.json || { echo "Bastion AMI building failed"; exit 1; }
+          packer build -force bastion.json || { echo "Bastion AMI building failed"; exit 1; }
 
   pulumi-deploy:
-    needs: setup
+    needs: [setup, packer-build-master-worker, bastion-packer-build]
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Deploy to EC2
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup SSH Key
         run: |
-          pulumi up --yes || { echo "Deployment failed"; exit 1; }
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deployer_key
+          chmod 600 ~/.ssh/deployer_key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Configure AWS Credentials for Pulumi
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: eu-west-2
+          role-session-name: GitHub-Pulumi-Deploy
+
+      - name: Deploy to EC2 with Pulumi
+        run: |
+          pulumi login --non-interactive
+          pulumi stack select ${{ secrets.PULUMI_STACK_NAME }}
+          pulumi up --yes || { echo "Pulumi deployment failed"; exit 1; }
+
+      - name: Export Pulumi Stack Outputs
+        run: |
+          pulumi stack output masterTag > master_tag.txt
+          pulumi stack output workerTag > worker_tag.txt
+          pulumi stack output bastionIp > bastion_ip.txt
+          pulumi stack output workerAsgName > worker_asg_name.txt
 
   dynamic-inventory:
     needs: pulumi-deploy
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set Up Python Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deployer_key
+          chmod 600 ~/.ssh/deployer_key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
       - name: Generate Dynamic Inventory
         run: |
-          python3 ${GITHUB_WORKSPACE}/dynamic_inventory.py \
-            ${{ secrets.MASTER_TAG }} \
-            ${{ secrets.WORKER_TAG }} \
-            ${{ secrets.BASTION_PUBLIC_IP }} > ${GITHUB_WORKSPACE}/inventory.json
+          MASTER_TAG=$(cat master_tag.txt)
+          WORKER_TAG=$(cat worker_tag.txt)
+          BASTION_PUBLIC_IP=$(cat bastion_ip.txt)
+          WORKER_ASG_NAME=$(cat worker_asg_name.txt)
+
+          python3 dynamic_inventory.py \
+            "$MASTER_TAG" \
+            "$WORKER_TAG" \
+            "$BASTION_PUBLIC_IP" \
+            "$WORKER_ASG_NAME" > inventory.json
+
           cat inventory.json
+
+      - name: Validate Inventory File
+        run: |
+          if ! jq empty inventory.json; then
+            echo "Invalid JSON inventory"
+            exit 1
+          fi
+          if ! jq '.k8s_master.hosts | length' inventory.json | grep -qv 0; then
+            echo "No master nodes found"
+            exit 1
+          fi
+
+      - name: Upload Artifact (Inventory)
+        uses: actions/upload-artifact@v3
+        with:
+          name: inventory
+          path: inventory.json
 
   ansible-deploy:
     needs: [pulumi-deploy, dynamic-inventory]
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
-      - name: Deploy kubeadm cluster using Ansible
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup SSH Key
         run: |
-          ansible-playbook -i inventory.json ansible/playbook.yml || { echo "Ansible deployment failed"; exit 1; }
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deployer_key
+          chmod 600 ~/.ssh/deployer_key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Download Artifact (Inventory)
+        uses: actions/download-artifact@v3
+        with:
+          name: inventory
+          path: .
+
+      - name: Deploy kubeadm Cluster with Ansible
+        run: |
+          ansible-playbook -i inventory.json ansible/playbook.yml \
+            -e ansible_ssh_common_args="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            || { echo "Ansible deployment failed"; exit 1; }
 
   verify-pulumi-stack:
     needs: ansible-deploy
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-node@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials for Verification
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: eu-west-2
+          role-session-name: GitHub-Pulumi-Verify
+
       - name: Verify Pulumi Stack Output
         run: |
-          pulumi show --stack ${{ secrets.PULUMI_STACK_NAME }} || { echo "Pulumi stack verification failed"; exit 1; }
+          pulumi stack select ${{ secrets.PULUMI_STACK_NAME }}
+          pulumi stack --show-substacks || { echo "Pulumi stack verification failed"; exit 1; }
+
+      - name: Upload Pulumi Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: pulumi-report
+          path: .

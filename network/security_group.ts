@@ -1,96 +1,133 @@
-// securityGroups.ts (or your relevant file)
 import * as aws from "@pulumi/aws";
-import { vpcId } from "./vpc_networking"; // Import vpcId from network.ts
+import * as pulumi from "@pulumi/pulumi";
+import { networkOutputs } from "./vpc_networking";
 
-// Create security group for master nodes
-export const masterSecurityGroup = new aws.ec2.SecurityGroup("masterSecurityGroup", {
-    vpcId: vpcId, // Use the imported vpcId here
-    ingress: [
-        { protocol: "tcp", fromPort: 6443, toPort: 6443, cidrBlocks: ["0.0.0.0/0"] }, // API server
-        { protocol: "tcp", fromPort: 2379, toPort: 2380, self: true }, // etcd
-        { protocol: "tcp", fromPort: 10250, toPort: 10250, self: true }, // Kubelet
-        { protocol: "tcp", fromPort: 10251, toPort: 10251, self: true }, // Scheduler
-        { protocol: "tcp", fromPort: 10252, toPort: 10252, self: true }, // Controller manager
-    ],
-    egress: [
-        { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
-    ],
+// Security Groups
+const bastionSecurityGroup = new aws.ec2.SecurityGroup("bastion-sg", {
+    vpcId: networkOutputs.vpcId,
+    description: "Bastion host security group",
+    tags: { Name: pulumi.interpolate`${networkOutputs.clusterName}-bastion-sg` },
 });
 
-// Create security group for worker nodes  
-export const workerSecurityGroup = new aws.ec2.SecurityGroup("workerSecurityGroup", {
-    vpcId: vpcId, // Use the imported vpcId here
-    ingress: [
-        { protocol: "tcp", fromPort: 10250, toPort: 10250, self: true }, // Kubelet
-        { protocol: "tcp", fromPort: 10255, toPort: 10255, self: true }, // Read-only Kubelet
-        { protocol: "tcp", fromPort: 30000, toPort: 32767, cidrBlocks: ["0.0.0.0/0"] }, // NodePort Services
-    ],
-    egress: [
-        { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
-    ],
+const masterSecurityGroup = new aws.ec2.SecurityGroup("master-sg", {
+    vpcId: networkOutputs.vpcId,
+    description: "Kubernetes master node security group",
+    tags: { Name: pulumi.interpolate`${networkOutputs.clusterName}-master-sg` },
 });
 
-// Define security group rules for master node communication
-new aws.ec2.SecurityGroupRule("masterNodeApiIngress", {
-    type: "ingress",
-    fromPort: 6443,
-    toPort: 6443,
-    protocol: "tcp",
-    securityGroupId: masterSecurityGroup.id,
-    sourceSecurityGroupId: workerSecurityGroup.id, // Allow communication from worker nodes
+const workerSecurityGroup = new aws.ec2.SecurityGroup("worker-sg", {
+    vpcId: networkOutputs.vpcId,
+    description: "Kubernetes worker node security group",
+    tags: { Name: pulumi.interpolate`${networkOutputs.clusterName}-worker-sg` },
 });
 
-new aws.ec2.SecurityGroupRule("workerNodeKubeletIngress", {
-    type: "ingress",
-    fromPort: 10250,
-    toPort: 10250,
-    protocol: "tcp",
-    securityGroupId: workerSecurityGroup.id,
-    sourceSecurityGroupId: masterSecurityGroup.id, // Allow communication from master nodes
-});
-
-// Create security group for bastion host
-export const bastionSecurityGroup = new aws.ec2.SecurityGroup("bastionSecurityGroup", {
-    vpcId: vpcId,
-    description: "Security group for bastion host",
-});
-
-// Add ingress rule for SSH access to bastion host
+// Bastion Rules
 new aws.ec2.SecurityGroupRule("bastionSshIngress", {
     type: "ingress",
     fromPort: 22,
     toPort: 22,
     protocol: "tcp",
     securityGroupId: bastionSecurityGroup.id,
-    cidrBlocks: ["0.0.0.0/0"], // Allow SSH access from anywhere
+    cidrBlocks: ["YOUR_TRUSTED_IP/32"], // REPLACE WITH ACTUAL IP
 });
 
-// Add egress rule for bastion host
 new aws.ec2.SecurityGroupRule("bastionEgress", {
     type: "egress",
     fromPort: 0,
     toPort: 0,
     protocol: "-1",
     securityGroupId: bastionSecurityGroup.id,
-    cidrBlocks: ["0.0.0.0/0"], // Allow all outbound traffic
+    cidrBlocks: ["0.0.0.0/0"],
 });
 
-// Update masterSecurityGroup to allow SSH access from bastion host
-new aws.ec2.SecurityGroupRule("masterBastionSshIngress", {
-    type: "ingress",
-    fromPort: 22,
-    toPort: 22,
-    protocol: "tcp",
-    securityGroupId: masterSecurityGroup.id,
-    sourceSecurityGroupId: bastionSecurityGroup.id,
+// Master Node Rules
+const masterRules = [
+    { port: 6443, sourceSecurityGroupId: workerSecurityGroup.id, description: "Kubernetes API from Workers" },
+    { port: 6443, sourceSecurityGroupId: bastionSecurityGroup.id, description: "Kubernetes API from Bastion" },
+    { port: 2379, sourceSecurityGroupId: masterSecurityGroup.id, description: "ETCD client" },
+    { port: 2380, sourceSecurityGroupId: masterSecurityGroup.id, description: "ETCD peer" },
+    { port: 10250, sourceSecurityGroupId: masterSecurityGroup.id, description: "Kubelet API" },
+    { port: 10251, sourceSecurityGroupId: masterSecurityGroup.id, description: "kube-scheduler" },
+    { port: 10252, sourceSecurityGroupId: masterSecurityGroup.id, description: "kube-controller-manager" },
+    { port: 22, sourceSecurityGroupId: bastionSecurityGroup.id, description: "SSH from Bastion" },
+    { port: 8472, sourceSecurityGroupId: workerSecurityGroup.id, protocol: "udp", description: "Flannel VXLAN" },
+    { port: 8472, sourceSecurityGroupId: masterSecurityGroup.id, protocol: "udp", description: "Flannel intra-master" },
+];
+
+masterRules.forEach((rule, idx) => {
+    new aws.ec2.SecurityGroupRule(`master-rule-${idx}`, {
+        securityGroupId: masterSecurityGroup.id,
+        type: "ingress",
+        fromPort: rule.port,
+        toPort: rule.port,
+        protocol: rule.protocol || "tcp",
+        sourceSecurityGroupId: rule.sourceSecurityGroupId,
+    });
 });
 
-// Update workerSecurityGroup to allow SSH access from bastion host
-new aws.ec2.SecurityGroupRule("workerBastionSshIngress", {
-    type: "ingress",
-    fromPort: 22,
-    toPort: 22,
-    protocol: "tcp",
-    securityGroupId: workerSecurityGroup.id,
-    sourceSecurityGroupId: bastionSecurityGroup.id,
+// Worker Node Rules
+const workerRules = [
+    { port: 10250, sourceSecurityGroupId: masterSecurityGroup.id, description: "Kubelet API from Masters" },
+    { 
+        port: 30000, 
+        endPort: 32767, 
+        cidrBlocks: [pulumi.interpolate`${networkOutputs.vpcCidr}`], 
+        description: "NodePort Services" 
+    },
+    { port: 22, sourceSecurityGroupId: bastionSecurityGroup.id, description: "SSH from Bastion" },
+    { port: 8472, sourceSecurityGroupId: workerSecurityGroup.id, protocol: "udp", description: "Flannel VXLAN" },
+    { port: 8472, sourceSecurityGroupId: masterSecurityGroup.id, protocol: "udp", description: "Flannel from Masters" },
+];
+
+workerRules.forEach((rule, idx) => {
+    new aws.ec2.SecurityGroupRule(`worker-rule-${idx}`, {
+        securityGroupId: workerSecurityGroup.id,
+        type: "ingress",
+        fromPort: rule.port,
+        toPort: rule.endPort || rule.port,
+        protocol: rule.protocol || "tcp",
+        ...(rule.sourceSecurityGroupId ? {
+            sourceSecurityGroupId: rule.sourceSecurityGroupId
+        } : {
+            cidrBlocks: rule.cidrBlocks
+        })
+    });
 });
+
+// VPC Endpoint Access
+[masterSecurityGroup, workerSecurityGroup].forEach((sg, idx) => {
+    new aws.ec2.SecurityGroupRule(`vpce-https-${idx}`, {
+        securityGroupId: sg.id,
+        type: "ingress",
+        fromPort: 443,
+        toPort: 443,
+        protocol: "tcp",
+        sourceSecurityGroupId: networkOutputs.vpcEndpointSecurityGroupId,
+    });
+});
+
+// Flow Logs (unchanged)
+const flowLogsBucket = new aws.s3.Bucket("vpc-flow-logs", {
+    acl: "private",
+    forceDestroy: false,
+    tags: { 
+        Name: pulumi.interpolate`${networkOutputs.clusterName}-flow-logs`,
+        "auto-delete": "never"
+    },
+});
+
+new aws.ec2.FlowLog("vpcFlowLogs", {
+    logDestination: pulumi.interpolate`arn:aws:s3:::${flowLogsBucket.id}/`,
+    trafficType: "ALL",
+    vpcId: networkOutputs.vpcId,
+    maxAggregationInterval: 60,
+    logFormat: "${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status}",
+});
+
+// Exports
+export const securityGroupIds = {
+    bastion: bastionSecurityGroup.id,
+    master: masterSecurityGroup.id,
+    worker: workerSecurityGroup.id,
+    vpcEndpoint: networkOutputs.vpcEndpointSecurityGroupId,
+};
