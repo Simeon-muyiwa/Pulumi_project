@@ -8,7 +8,10 @@
       "ami_name": "ubuntu-jammy-{{timestamp}}",
       "ssh_username": "ubuntu",
       "tags": {
-        "Name": "Bastion AMI"
+        "Name": "Worker-Master AMI",
+        "{{env `CLUSTER_TAG`}}": "owned",
+        "Role": ["worker", "master"]
+
       },
       "ami_regions": ["eu-west-2"],
       "associate_public_ip_address": false,

@@ -2,11 +2,10 @@
 import json
 import os
 import time
-from typing import Dict, Any, List
+import sys
+import subprocess
 import boto3
 from botocore.exceptions import ClientError
-import subprocess
-import hashlib
 
 class CacheManager:
     def __init__(self, cache_ttl=300):
@@ -40,11 +39,14 @@ class CacheManager:
             print(f"Cache write warning: {e}", file=sys.stderr)
 
 class Ec2Inventory:
-    def __init__(self, master_tag, worker_tag, bastion_public_ip, asg_name):
-        self.master_tag = master_tag
-        self.worker_tag = worker_tag
+    def __init__(self, cluster_tag, bastion_public_ip, asg_name, account_id, role_name, cluster_id, domain):
+        self.cluster_tag = cluster_tag  # Format: 'kubernetes.io/cluster/<name>'
         self.bastion_public_ip = bastion_public_ip
         self.asg_name = asg_name
+        self.account_id = account_id
+        self.role_name = role_name
+        self.cluster_id = cluster_id
+        self.domain = domain
         self.ssh_key_path = os.environ.get('SSH_KEY_PATH', '~/.ssh/deployer_key')
         self.common_args = self._build_ssh_args()
         self.ec2_client = boto3.client('ec2', region_name='eu-west-2')
@@ -57,21 +59,25 @@ class Ec2Inventory:
         return (
             f"-o StrictHostKeyChecking=no "
             f"-o UserKnownHostsFile=/dev/null "
-            f"-o ProxyCommand='ssh -W %h:%p -i {self.ssh_key_path} ec2-user@{self.bastion_public_ip}'"
+            f"-o ProxyCommand='ssh -W %h:%p -i {self.ssh_key_path} ubuntu@{self.bastion_public_ip}'"
         )
 
     def _verify_bastion_connection(self):
-        try:
-            subprocess.run(
-                ["ssh", "-q", "-i", self.ssh_key_path, 
-                 f"ec2-user@{self.bastion_public_ip}", "exit"],
-                check=True, 
-                timeout=10,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            raise SystemExit(f"Bastion connection failed: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                subprocess.run(
+                    ["ssh", "-q", "-i", self.ssh_key_path, f"ubuntu@{self.bastion_public_ip}", "exit"],
+                    check=True,
+                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                if attempt == max_retries - 1:
+                    raise SystemExit(f"Bastion connection failed after {max_retries} attempts: {e}")
+                time.sleep(5)
 
     def get_inventory(self):
         cached_data = self.cache.read_cache()
@@ -84,9 +90,10 @@ class Ec2Inventory:
 
     def _cache_invalid(self, cached_data):
         try:
-            asg_update_time = self.asg_client.describe_auto_scaling_groups(
+            asg_info = self.asg_client.describe_auto_scaling_groups(
                 AutoScalingGroupNames=[self.asg_name]
-            )['AutoScalingGroups'][0]['CreatedTime'].timestamp()
+            )
+            asg_update_time = asg_info['AutoScalingGroups'][0]['LastModifiedTime'].timestamp()
             
             cache_time = os.path.getmtime(self.cache.cache_file)
             return asg_update_time > cache_time or any(
@@ -106,16 +113,20 @@ class Ec2Inventory:
         }
         
         common_vars = {
-            "ansible_user": "ec2-user",
+            "ansible_user": "ubuntu",  # Matches Pulumi's ubuntu user
             "ansible_ssh_common_args": self.common_args,
-            "ansible_ssh_private_key_file": self.ssh_key_path
+            "ansible_ssh_private_key_file": self.ssh_key_path,
+            "account_id": self.account_id,
+            "role_name": self.role_name,
+            "cluster_id": self.cluster_id,
+            "domain": self.domain
         }
         
         instances = self._collect_instances()
         
         for instance in instances.values():
-            role = self._determine_role(instance['tags'])
-            if not role:
+            role = instance['tags'].get('Role')
+            if not role or role not in ['master', 'worker']:
                 continue
             
             group_key = f"k8s_{role}"
@@ -130,42 +141,46 @@ class Ec2Inventory:
     def _collect_instances(self):
         instances = {}
         
-        # Process ASG instances
+        # Cluster ownership filter
+        cluster_filter = [{
+            'Name': f'tag:{self.cluster_tag}',
+            'Values': ['shared', 'owned']
+        }]
+
+        # Master/worker role filter
+        role_filter = [{
+            'Name': 'tag:Role',
+            'Values': ['master', 'worker']
+        }]
+
+        try:
+            paginator = self.ec2_paginator.paginate(
+                Filters=[
+                    *cluster_filter,
+                    *role_filter,
+                    {'Name': 'instance-state-name', 'Values': ['running']}
+                ]
+            )
+            for page in paginator:
+                for reservation in page['Reservations']:
+                    for instance in reservation['Instances']:
+                        self._add_instance(instance['InstanceId'], instances)
+        except ClientError as e:
+            print(f"EC2 query error: {e}", file=sys.stderr)
+
+        # Add ASG workers if needed
         if self.asg_name:
             try:
-                asg_instances = self.asg_client.describe_auto_scaling_instances(
-                    MaxRecords=100
-                )
+                asg_instances = self.asg_client.describe_auto_scaling_instances(MaxRecords=100)
                 for instance in asg_instances['AutoScalingInstances']:
                     if instance['AutoScalingGroupName'] == self.asg_name:
-                        self._add_instance(instance['InstanceId'], instances, 'worker')
+                        self._add_instance(instance['InstanceId'], instances)
             except ClientError as e:
                 print(f"ASG error: {e}", file=sys.stderr)
-
-        # Process tagged instances
-        roles = [
-            ('master', self.master_tag),
-            ('worker', self.worker_tag)
-        ]
-        
-        for role, tag in roles:
-            try:
-                paginator = self.ec2_paginator.paginate(
-                    Filters=[
-                        {'Name': 'tag:Role', 'Values': [tag]},
-                        {'Name': 'instance-state-name', 'Values': ['running']}
-                    ]
-                )
-                for page in paginator:
-                    for reservation in page['Reservations']:
-                        for instance in reservation['Instances']:
-                            self._add_instance(instance['InstanceId'], instances, role)
-            except ClientError as e:
-                print(f"EC2 {role} error: {e}", file=sys.stderr)
                 
         return instances
 
-    def _add_instance(self, instance_id, instances, role):
+    def _add_instance(self, instance_id, instances):
         if instance_id in instances:
             return
             
@@ -196,28 +211,22 @@ class Ec2Inventory:
             }
         }
 
-    def _determine_role(self, tags):
-        role = tags.get('Role', '')
-        if self.master_tag in role:
-            return 'master'
-        elif self.worker_tag in role:
-            return 'worker'
-        return None
-
 def main():
-    if len(sys.argv) != 5:
-        print("Usage: ./dynamic_inventory.py <master_tag> <worker_tag> <bastion_ip> <asg_name>")
+    if len(sys.argv) != 8:
+        print("Usage: ./dynamic_inventory.py <cluster_tag> <bastion_ip> <asg_name> <account_id> <role_name> <cluster_id> <domain>")
         sys.exit(1)
         
     inventory = Ec2Inventory(
-        master_tag=sys.argv[1],
-        worker_tag=sys.argv[2],
-        bastion_public_ip=sys.argv[3],
-        asg_name=sys.argv[4]
+        cluster_tag=sys.argv[1],
+        bastion_public_ip=sys.argv[2],
+        asg_name=sys.argv[3],
+        account_id=sys.argv[4],
+        role_name=sys.argv[5],
+        cluster_id=sys.argv[6],
+        domain=sys.argv[7]
     ).get_inventory()
     
     print(json.dumps(inventory, indent=2))
 
 if __name__ == "__main__":
-    import sys
     main()
