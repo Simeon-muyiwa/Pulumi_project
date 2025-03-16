@@ -198,7 +198,7 @@ class Ec2Inventory:
             return None
 
     def _format_instance(self, instance):
-        tags = {t['Key']: t['Value'] for t in instance.get('Tags', [])}
+        tags = {t['Key'].lower: t['Value'] for t in instance.get('Tags', [])}
         return {
             "private_ip": instance.get('PrivateIpAddress', ''),
             "public_ip": instance.get('PublicIpAddress', ''),
