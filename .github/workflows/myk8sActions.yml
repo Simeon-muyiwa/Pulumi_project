@@ -41,6 +41,48 @@ jobs:
           sudo apt-get install -y ansible packer python3 python3-pip jq
           pip3 install boto3
 
+      - name: Generate Cluster OIDC Certificate
+        run: |
+          openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
+            -keyout cluster-oidc.key -out cluster-oidc.crt \
+            -subj "/CN=oidc.${{ vars.CLUSTER_DOMAIN }}" \
+            -addext "subjectAltName=DNS:oidc.${{ vars.CLUSTER_DOMAIN }}"
+          echo "CLUSTER_CERT=$(base64 -w0 cluster-oidc.crt)" >> $GITHUB_ENV
+          echo "CLUSTER_KEY=$(base64 -w0 cluster-oidc.key)" >> $GITHUB_ENV
+
+      - name: Get Cluster Thumbprint
+        run: |
+          openssl x509 -in cluster-oidc.crt -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' >> cluster-thumbprint.txt
+          echo "CLUSTER_THUMBPRINT=$(cat cluster-thumbprint.txt)" >> $GITHUB_ENV
+
+      - name: Get GitHub OIDC Thumbprint
+        run: |
+          openssl s_client -connect token.actions.githubusercontent.com:443 \
+            -servername token.actions.githubusercontent.com < /dev/null 2>/dev/null | \
+            openssl x509 -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' >> github-thumbprint.txt
+          echo "GITHUB_THUMBPRINT=$(cat github-thumbprint.txt)" >> $GITHUB_ENV
+
+      - name: Configure Pulumi Secrets
+        uses: pulumi/actions@v4
+        with:
+          command: config set --secret
+          args: |
+            githubOidcThumbprint ${{ env.GITHUB_THUMBPRINT }}
+            clusterOidcThumbprint ${{ env.CLUSTER_THUMBPRINT }}
+            clusterOidcCert ${{ env.CLUSTER_CERT }}
+            clusterOidcKey ${{ env.CLUSTER_KEY }}
+
+      - name: Upload Cert Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: cluster-oidc-certs
+          path: |
+            cluster-oidc.crt
+            cluster-oidc.key
+          retention-days: 1
+
   packer-build-master-worker:
     needs: setup
     runs-on: ubuntu-latest
