@@ -241,10 +241,14 @@ jobs:
         run: |
           ansible-playbook -i inventory/inventory.json ansible/cluster-init.yml \
             -e "kms_key_arn=${{ secrets.KMS_KEY_ARN }}" \
-            -e "oidc_role_arn=$(cat outputs/oidc-role.txt)" \
+            -e "oidc_role_arn=$(cat outputs/oidcRoleArn.txt)"\
             -e "permission_boundary_arn=$(cat outputs/boundary-arn.txt)" \
-            -e "cluster_issuer=${{ secrets.CLUSTER_ISSUER }}" \
+            -e "cluster_issuer=$(cat outputs/domain.txt)" \
             -e "ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+      - name: Configure Boundary
+        run: |
+          echo "AWS_PERMISSION_BOUNDARY=$(cat outputs/boundary-arn.txt)" >> $GITHUB_ENV
 
   cluster-validation:
     needs: ansible-deploy

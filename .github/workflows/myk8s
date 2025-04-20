@@ -1,0 +1,321 @@
+name: OIDC-Secured Kubernetes Deployment
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Deployment branch"
+        required: true
+        default: main
+        type: choice
+        options: [main, develop, release/*]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLUSTER_DOMAIN: ${{ secrets.CLUSTER_DOMAIN }}
+  OIDC_ROLE_ARN: ${{ secrets.OIDC_ROLE_ARN }}
+  PULUMI_STACK: ${{ secrets.PULUMI_STACK }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Pulumi CLI
+        run: npm install -g @pulumi/pulumi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: setup-${{ github.run_id }}
+          role-tags: |
+            Stage=Setup
+            Component=OIDC
+
+      - name: Validate AWS Identity
+        run: |
+          aws sts get-caller-identity | jq -r '.Arn' | grep "role/OIDC-Role"
+
+      - name: Install System Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible packer python3 python3-pip jq
+          pip3 install boto3
+
+      - name: Generate OIDC Certificates
+        run: |
+          openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
+            -keyout cluster-oidc.key -out cluster-oidc.crt \
+            -subj "/CN=oidc.${CLUSTER_DOMAIN}" \
+            -addext "subjectAltName=DNS:oidc.${CLUSTER_DOMAIN}"
+
+          echo "CLUSTER_CERT=$(base64 -w0 cluster-oidc.crt)" >> $GITHUB_ENV
+          echo "CLUSTER_KEY=$(base64 -w0 cluster-oidc.key)" >> $GITHUB_ENV
+
+      - name: Capture Thumbprints
+        run: |
+          openssl x509 -in cluster-oidc.crt -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' > cluster-thumbprint.txt
+
+          openssl s_client -connect token.actions.githubusercontent.com:443 \
+            -servername token.actions.githubusercontent.com < /dev/null 2>/dev/null | \
+            openssl x509 -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' > github-thumbprint.txt
+
+      - name: Secure Configuration
+        uses: pulumi/actions@v4
+        with:
+          command: config set --secret
+          args: |
+            githubOidcThumbprint $(cat github-thumbprint.txt)
+            clusterOidcThumbprint $(cat cluster-thumbprint.txt)
+            clusterOidcCert ${{ env.CLUSTER_CERT }}
+            clusterOidcKey ${{ env.CLUSTER_KEY }}
+
+      - name: Archive Certificates
+        uses: actions/upload-artifact@v3
+        with:
+          name: oidc-certs
+          path: |
+            cluster-oidc.crt
+            cluster-oidc.key
+          retention-days: 1
+
+  packer-build-master-worker:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-master-${{ github.run_id }}
+
+      - name: Setup SSH Access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/deployer
+          chmod 600 ~/.ssh/deployer
+
+      - name: Build Cluster AMI
+        uses: hashicorp/packer-github-actions@v1
+        with:
+          command: build -force
+          arguments: kubeadm.json
+          env_vars: |
+            AWS_SESSION_TOKEN=${{ env.AWS_SESSION_TOKEN }}
+            CLUSTER_TAG=${{ secrets.CLUSTER_TAG }}
+            OIDC_ROLE=${{ env.OIDC_ROLE_ARN }}
+
+  bastion-packer-build:
+    needs: packer-build-master-worker
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-bastion-${{ github.run_id }}
+
+      - name: Build Bastion AMI
+        uses: hashicorp/packer-github-actions@v1
+        with:
+          command: build -force
+          arguments: bastion.json
+          env_vars: |
+            AWS_SESSION_TOKEN=${{ env.AWS_SESSION_TOKEN }}
+            BASTION_ROLE=${{ env.OIDC_ROLE_ARN }}
+
+  pulumi-deploy:
+    needs: [setup, bastion-packer-build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: pulumi-${{ github.run_id }}
+
+      - name: Deploy Infrastructure
+        uses: pulumi/actions@v4
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
+        with:
+          command: up
+          stack-name: ${{ env.PULUMI_STACK }}
+          options: --yes --skip-preview
+
+      - name: Export Outputs
+        run: |
+          pulumi stack output --json > outputs.json
+          jq -r '[
+            .masterTag, .bastionIp, .workerAsgName, 
+            .accountId, .roleName, .clusterId, 
+            .domain, .oidcRoleArn, .permissionBoundaryArn
+          ] | join("\n")' outputs.json > outputs.txt
+
+          read -r MASTER_TAG BASTION_IP WORKER_ASG ACCOUNT_ID ROLE_NAME \
+            CLUSTER_ID DOMAIN OIDC_ROLE BOUNDARY_ARN < outputs.txt
+
+          printf "%s\n" "$MASTER_TAG" > master-tag.txt
+          printf "%s\n" "$BASTION_IP" > bastion-ip.txt
+          printf "%s\n" "$WORKER_ASG" > worker-asg.txt
+          printf "%s\n" "$ACCOUNT_ID" > account-id.txt
+          printf "%s\n" "$ROLE_NAME" > role-name.txt
+          printf "%s\n" "$CLUSTER_ID" > cluster-id.txt
+          printf "%s\n" "$DOMAIN" > domain.txt
+          printf "%s\n" "$OIDC_ROLE" > oidc-role.txt
+          printf "%s\n" "$BOUNDARY_ARN" > boundary-arn.txt
+
+      - name: Publish Outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-outputs
+          path: |
+            *.txt
+            outputs.json
+          retention-days: 7
+
+  dynamic-inventory:
+    needs: pulumi-deploy
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Retrieve Outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs
+          path: ./outputs
+
+      - name: Generate Inventory
+        run: |
+          python3 inventory.py \
+            "$(cat outputs/master-tag.txt)" \
+            "$(cat outputs/bastion-ip.txt)" \
+            "$(cat outputs/worker-asg.txt)" \
+            "$(cat outputs/account-id.txt)" \
+            "$(cat outputs/role-name.txt)" \
+            "$(cat outputs/cluster-id.txt)" \
+            "$(cat outputs/domain.txt)" > inventory.json
+
+      - name: Validate Inventory
+        run: |
+          jq -e '.k8s_master.hosts | length > 0' inventory.json || exit 1
+          jq -e '.k8s_worker.hosts | length > 0' inventory.json || exit 1
+
+      - name: Store Inventory
+        uses: actions/upload-artifact@v3
+        with:
+          name: ansible-inventory
+          path: inventory.json
+
+  ansible-deploy:
+    needs: dynamic-inventory
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Retrieve Inventory
+        uses: actions/download-artifact@v3
+        with:
+          name: ansible-inventory
+          path: ./inventory
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/deployer
+          chmod 600 ~/.ssh/deployer
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ansible-${{ github.run_id }}
+
+      - name: Execute Ansible
+        run: |
+          ansible-playbook -i inventory/inventory.json ansible/cluster-init.yml \
+            -e "oidc_role_arn=$(cat outputs/oidc-role.txt)" \
+            -e "permission_boundary_arn=$(cat outputs/boundary-arn.txt)" \
+            -e "cluster_issuer=oidc.${CLUSTER_DOMAIN}" \
+            -e "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
+
+  cluster-validation:
+    needs: ansible-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Cluster State
+        run: |
+          kubectl get nodes -o wide
+          kubectl -n kube-system get pods
+          kubectl get svc
+
+  rollback:
+    needs: [pulumi-deploy, ansible-deploy]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Assume Destruction Role
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rollback-${{ github.run_id }}
+
+      - name: Destroy Resources
+        run: |
+          pulumi destroy --yes --skip-preview --stack ${{ env.PULUMI_STACK }}
+          aws ec2 terminate-instances \
+            --instance-ids $(aws ec2 describe-instances \
+              --filters "Name=tag:Cluster,Values=${CLUSTER_ID}" \
+              --query "Reservations[].Instances[].InstanceId" \
+              --output text)
+
+      - name: Cleanup Ansible
+        run: |
+          ansible-playbook -i inventory/inventory.json ansible/rollback.yml

@@ -39,18 +39,19 @@ class CacheManager:
             print(f"Cache write warning: {e}", file=sys.stderr)
 
 class Ec2Inventory:
-    def __init__(self, cluster_tag, bastion_public_ip, asg_name, account_id, role_name, cluster_id, domain):
-        self.cluster_tag = cluster_tag  # Format: 'kubernetes.io/cluster/<name>'
+    def __init__(self, master_public_ip, bastion_public_ip, worker_asg_name, issuer_url, account_id, role_name, domain):
+        self.cluster_tag = f"kubernetes.io/cluster/{os.environ.get('CLUSTER_NAME', '')}"
         self.bastion_public_ip = bastion_public_ip
-        self.asg_name = asg_name
-        self.account_id = account_id
-        self.role_name = role_name
-        self.cluster_id = cluster_id
-        self.domain = domain
-        self.ssh_key_path = os.environ.get('SSH_KEY_PATH', '~/.ssh/deployer_key')
+        self.asg_name = worker_asg_name
+        self.issuer_url = issuer_url
+        self.account_id = account_id  # Critical for IAM OIDC provider
+        self.role_name = role_name    # Needed for kube-apiserver --oidc-* flags
+        self.domain = domain          # Used for certificate generation
+        self.ssh_key_path = os.path.expanduser(os.environ.get('SSH_KEY_PATH', '~/.ssh/deployer'))
         self.common_args = self._build_ssh_args()
-        self.ec2_client = boto3.client('ec2', region_name='eu-west-2')
-        self.asg_client = boto3.client('autoscaling', region_name='eu-west-2')
+        self.region = os.environ.get('AWS_REGION', 'eu-west-2')
+        self.ec2_client = boto3.client('ec2', region_name=self.region)
+        self.asg_client = boto3.client('autoscaling', region_name=self.region)
         self.ec2_paginator = self.ec2_client.get_paginator('describe_instances')
         self.cache = CacheManager(cache_ttl=int(os.environ.get('CACHE_TTL', '300')))
         self._verify_bastion_connection()
@@ -107,35 +108,66 @@ class Ec2Inventory:
 
     def _generate_fresh_inventory(self):
         inventory = {
-            "k8s_master": {"hosts": [], "vars": {}},
-            "k8s_worker": {"hosts": [], "vars": {}},
-            "_meta": {"hostvars": {}}
+            "k8s_master": {"hosts": {}, "vars": {}},
+            "k8s_worker": {"hosts": {}, "vars": {}},
+            "_meta": {"hostvars": {}},
+            "all": {
+                "vars": {
+                    # Core OIDC Configuration
+                    "oidc_issuer_url": self.issuer_url,
+                    "oidc_client_id": "sts.amazonaws.com",
+                    "oidc_username_claim": "sub",
+                    "oidc_groups_claim": "groups",
+                    
+                    # AWS-specific Parameters
+                    "aws_account_id": self.account_id,
+                    "aws_region": self.region,
+                    "iam_role_name": self.role_name,
+                    "cluster_domain": self.domain,
+                    
+                    # Common Ansible Settings
+                    "ansible_user": "ubuntu",
+                    "ansible_ssh_common_args": self.common_args,
+                    "ansible_ssh_private_key_file": self.ssh_key_path,
+                    "irsa_enabled": True,
+                    "cluster_name": os.environ.get('CLUSTER_NAME', '')
+                }
+            }
         }
-        
-        common_vars = {
-            "ansible_user": "ubuntu",  # Matches Pulumi's ubuntu user
-            "ansible_ssh_common_args": self.common_args,
-            "ansible_ssh_private_key_file": self.ssh_key_path,
-            "account_id": self.account_id,
-            "role_name": self.role_name,
-            "cluster_id": self.cluster_id,
-            "domain": self.domain
-        }
-        
+
         instances = self._collect_instances()
         
-        for instance in instances.values():
-            role = instance['tags'].get('Role')
-            if not role or role not in ['master', 'worker']:
+        for instance_id, instance in instances.items():
+            role = instance['tags'].get('Role', '').lower()
+            if role not in ['master', 'worker']:
                 continue
             
             group_key = f"k8s_{role}"
             private_ip = instance['private_ip']
             
-            inventory[group_key]["hosts"].append(private_ip)
-            inventory[group_key]["vars"] = common_vars
+            inventory[group_key]["hosts"][private_ip] = {}
             inventory["_meta"]["hostvars"][private_ip] = instance
             
+            # Master-specific API server configuration
+            if role == "master":
+                inventory[group_key]["vars"] = {
+                    "is_control_plane": True,
+                    "kube_api_server": f"https://{private_ip}:6443",
+                    "api_server_extra_args": {
+                        "oidc-issuer-url": self.issuer_url,
+                        "oidc-client-id": "sts.amazonaws.com",
+                        "oidc-username-claim": "sub",
+                        "oidc-groups-claim": "groups",
+                        "service-account-key-file": "/etc/kubernetes/pki/sa.pub",
+                        "service-account-signing-key-file": "/etc/kubernetes/pki/sa.key",
+                        "api-audiences": f"sts.amazonaws.com,{self.account_id}"
+                    }
+                }
+            elif role == "worker":
+                inventory[group_key]["vars"] = {
+                    "is_worker_node": True
+                }
+
         return inventory
 
     def _collect_instances(self):
@@ -198,7 +230,7 @@ class Ec2Inventory:
             return None
 
     def _format_instance(self, instance):
-        tags = {t['Key'].lower: t['Value'] for t in instance.get('Tags', [])}
+        tags = {t['Key'].lower(): t['Value'] for t in instance.get('Tags', [])}
         return {
             "private_ip": instance.get('PrivateIpAddress', ''),
             "public_ip": instance.get('PublicIpAddress', ''),
@@ -207,22 +239,23 @@ class Ec2Inventory:
                 "az": instance['Placement']['AvailabilityZone'],
                 "launch_time": instance['LaunchTime'].timestamp(),
                 "image_id": instance['ImageId'],
-                "id": instance['InstanceId']
+                "id": instance['InstanceId'],
+                "type": instance.get('InstanceType', '')
             }
         }
 
 def main():
     if len(sys.argv) != 8:
-        print("Usage: ./dynamic_inventory.py <cluster_tag> <bastion_ip> <asg_name> <account_id> <role_name> <cluster_id> <domain>")
+        print("Usage: ./dynamic_inventory.py <master_ip> <bastion_ip> <worker_asg> <issuer_url> <account_id> <role_name> <domain>")
         sys.exit(1)
         
     inventory = Ec2Inventory(
-        cluster_tag=sys.argv[1],
+        master_public_ip=sys.argv[1],
         bastion_public_ip=sys.argv[2],
-        asg_name=sys.argv[3],
-        account_id=sys.argv[4],
-        role_name=sys.argv[5],
-        cluster_id=sys.argv[6],
+        worker_asg_name=sys.argv[3],
+        issuer_url=sys.argv[4],
+        account_id=sys.argv[5],
+        role_name=sys.argv[6],
         domain=sys.argv[7]
     ).get_inventory()
     

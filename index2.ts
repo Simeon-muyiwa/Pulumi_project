@@ -3,36 +3,18 @@ import * as pulumi from "@pulumi/pulumi";
 import { masterResources } from "./instances/master";
 import { workerResources } from "./instances/worker";
 import { bastionResources } from "./instances/bastion";
-import { imdsPolicy, securityTags, baseConfig, coreExports } from "./shared2"; // Changed import
+import { 
+  imdsPolicy, 
+  securityTags, 
+  baseConfig, 
+  coreExports,
+  irsaRoles,
+  githubActionsRole
+} from "./shared2";
 
 const config = new pulumi.Config("myproject");
 
-
-
-// Updated OIDC Policy using baseConfig
-const oidcPolicy = new aws.iam.Policy("oidc-policy", {
-  policy: pulumi.all([baseConfig.accountId, coreExports.oidcDomain])
-    .apply(([accountId, oidcDomain]) => JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [{
-        Effect: "Allow",
-        Principal: { 
-          Federated: coreExports.clusterOidcArn
-        },
-        Action: "sts:AssumeRoleWithWebIdentity",
-        Condition: {
-          StringEquals: {
-            [`${oidcDomain}:sub`]: [
-              "system:serviceaccount:kube-system:ebs-csi-controller",
-              "system:serviceaccount:default:cluster-autoscaler"
-            ]
-          }
-        }
-      }]
-    }))
-});
-
-// IMDS policy attachment remains unchanged
+// IMDS policy attachment
 [masterResources.iamProfile, workerResources.iamProfile, bastionResources.iamProfile]
   .forEach((profile, index) => {
     new aws.iam.RolePolicyAttachment(`${profile.name}-imds`, {
@@ -41,14 +23,14 @@ const oidcPolicy = new aws.iam.Policy("oidc-policy", {
     });
   });
 
-// Updated exports using baseConfig
+// Exports
 export const clusterId = baseConfig.clusterName;
 export const domain = baseConfig.domain;
 export const accountId = baseConfig.accountId;
 export const clusterTag = securityTags.clusterTag(clusterId);
 export const roleName = pulumi.output(masterResources.iamProfile.role).apply(r => r?.valueOf.name);
 
-// Remaining exports unchanged
+// Infrastructure exports
 export const masterPublicIp = masterResources.details.publicIp;
 export const masterPrivateIp = masterResources.details.privateIp;
 export const workerAsgName = workerResources.autoScalingGroup;
@@ -61,15 +43,28 @@ export const infrastructure = {
   _tags: securityTags.baseTags
 };
 
-export const githubActionsConfig = pulumi.all([
-  coreExports.githubOidcArn,
-  baseConfig.accountId
-]).apply(([arn, account]) => ({
-  AWS_ROLE_ARN: `arn:aws:iam::${account}:role/GitHubActionsRole`,
-  AWS_OIDC_PROVIDER: arn
-}));
+// OIDC exports
+export const githubActionsConfig = {
+  AWS_ROLE_ARN: githubActionsRole.arn,
+  AWS_OIDC_PROVIDER: coreExports.githubOidcArn,
+  AWS_REGION: baseConfig.region
+};
 
-// Updated OIDC exports
-export const oidcRoleArn = coreExports.permissionBoundaryArn;
-export const clusterIssuer = pulumi.interpolate`oidc.${baseConfig.domain}`; 
+// Consolidated IRSA exports
+export const irsaConfig = pulumi.output({
+  ebsCSI: irsaRoles.ebsCSI.arn,
+  clusterAutoscaler: irsaRoles.clusterAutoscaler.arn,
+  externalDNS: irsaRoles.externalDNS?.arn, // Optional role
+  // Add any additional IRSA roles here
+});
+
+export const oidcRoleArn = irsaRoles.ebsCSI.arn; // Backward compatibility
+export const clusterIssuer = pulumi.interpolate`oidc.${baseConfig.domain}`;
 export const githubActionsOidcArn = coreExports.githubOidcArn;
+
+// Additional utility exports
+export const oidcConfiguration = {
+  issuerUrl: pulumi.interpolate`https://oidc.${baseConfig.domain}`,
+  arn: coreExports.clusterOidcArn,
+  // thumbprint: coreExports.clusterThumbprint
+};
