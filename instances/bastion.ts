@@ -119,7 +119,7 @@ const bastionHost = new aws.ec2.Instance("bastion-host",
     subnetId: pulumi.all(networkOutputs.publicSubnetIds).apply(
       (subnets: string[]) => subnets[0]
     ),
-    vpcSecurityGroupIds: [bastionSecurityGroup.id],
+    vpcSecurityGroupIds: [securityGroupIds.bastion],
     iamInstanceProfile: bastionInstanceProfile.name,
     keyName: keyPair.deployer.keyName,
     associatePublicIpAddress: true,

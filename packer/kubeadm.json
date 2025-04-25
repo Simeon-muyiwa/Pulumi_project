@@ -1,38 +1,62 @@
 {
-  "builders": [
-    {
-      "type": "amazon-ebs",
-      "region": "eu-west-2",
-      "source_ami": "ami-0360648695d898cd7",
-      "instance_type": "t2.micro",
-      "ami_name": "ubuntu-jammy-{{timestamp}}",
-      "ssh_username": "ubuntu",
-      "tags": {
-        "Name": "Worker-Master AMI",
-        "{{env `CLUSTER_TAG`}}": "owned",
-        "Role": ["worker", "master"]
-
-      },
-      "ami_regions": ["eu-west-2"],
-      "associate_public_ip_address": false,
-      "ssh_agent_auth": true,
-      "run_tags": {
-        "Name": "Ubuntu Jammy Image Build"
-      }
+  "variables": {
+    "cluster_name": "{{env `CLUSTER_NAME`}}",
+    "node_role": "{{env `NODE_ROLE`}}",
+    "source_ami": "{{env `SOURCE_AMI`}}",
+    "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}"
+  },
+  "builders": [{
+    "type": "amazon-ebs",
+    "region": "{{user `aws_region`}}",
+    "source_ami": "{{user `source_ami`}}",
+    "instance_type": "t3.small",
+    "ami_name": "k8s-{{user `cluster_name`}}-{{user `node_role`}}-{{timestamp}}",
+    "ssh_username": "ubuntu",
+    "tags": {
+      "Name": "{{user `cluster_name`}}-{{user `node_role`}}",
+      "{{user `cluster_name`}}-node": "{{user `node_role`}}",
+      "kubernetes.io/cluster/{{user `cluster_name`}}": "shared",
+      "Component": "kubernetes",
+      "AutoUpdate": "true",
+      "PackerBuilt": "true"
+    },
+    "ami_regions": ["{{user `aws_region`}}"],
+    "associate_public_ip_address": false,
+    "ssh_agent_auth": true,
+    "run_tags": {
+      "TemporaryBuildInstance": "true",
+      "Name": "{{user `cluster_name`}}-packer-builder"
     }
-  ],
+  }],
   "provisioners": [
     {
-      "type": "ansible",
-      "playbook_file": "../ansible/kubeadm/templates/common_kubeadm.yaml"
-    }
-  ],
-  "post-processors": [
-    {
-      "type": "shell-local",
+      "type": "shell",
       "inline": [
-        "echo 'AMI_ID={{ .Builds.ArtifactID }}' > kubeadm_ami_id.txt"
+        "sudo rm -rf /etc/apt/sources.list.d/docker.list",
+        "sudo systemctl stop apt-daily.service",
+        "sudo systemctl kill --kill-who=all apt-daily.service"
+      ]
+    },
+    {
+      "type": "ansible",
+      "playbook_file": "ansible/kubeadm/templates/common.yaml",
+      "extra_arguments": [
+        "--extra-vars", "node_role={{user `node_role`}}",
+        "--vault-password-file=/tmp/vault-pass"
+      ],
+      "ansible_env_vars": [
+        "ANSIBLE_PIPELINING=True",
+        "ANSIBLE_REMOTE_TEMP=/tmp/.ansible"
       ]
     }
-  ]
+  ],
+"post-processors": [
+  {
+    "type": "shell-local",
+    "inline": [
+      "mkdir -p build-artifacts/{{user `node_role`}}",
+      "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt"
+    ]
+  }
+]
 }

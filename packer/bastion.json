@@ -1,45 +1,56 @@
 {
-    "builders": [
-      {
-        "type": "amazon-ebs",
-        "region": "eu-west-2",
-        "source_ami": "ami-0360648695d898cd7",
-        "instance_type": "t2.micro",
-        "ami_name": "ubuntu-jammy-{{timestamp}}",
-        "ssh_username": "ubuntu",
-        "tags": {
-          "Name": "Kubeadm common AMI"
-        },
-        "ami_regions": ["eu-west-2"],
-        "associate_public_ip_address": true,
-        "ssh_agent_auth": true,
-        "run_tags": {
-          "Name": "Ubuntu Jammy Image Build"
-        }
-      }
-    ],
-    "provisioners": [
-      {
-        "type": "shell",
-        "inline": [
-          "sudo apt-get update",
-          "sudo apt-get upgrade -y",
-          "sudo apt-get install -y python3-pip",
-          "sudo apt-get install -y sshpass",
-          "sudo pip3 install ansible"
-        ]
-      },
-      {
-        "type": "ansible",
-        "playbook_file": "../ansible/common_kubeadm.yaml"
-      }
-    ],
-    "post-processors": [
-      {
-        "type": "shell-local",
-        "inline": [
-          "echo 'AMI_ID={{ .Builds.ArtifactID }}' > bastion_ami_id.txt"
-        ]
-      }
-    ]
-  }
+  "variables": {
+    "cluster_name": "{{env `CLUSTER_NAME`}}",
+    "source_ami": "{{env `SOURCE_AMI`}}",
+    "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}"
+  },
+  "builders": [{
+    "type": "amazon-ebs",
+    "region": "{{user `aws_region`}}",
+    "source_ami": "{{user `source_ami`}}",
+    "instance_type": "t2.micro",
+    "ami_name": "k8s-{{user `cluster_name`}}-bastion-{{timestamp}}",
+    "ssh_username": "ubuntu",
+    "tags": {
+      "Name": "{{user `cluster_name`}}-bastion",
+      "Component": "bastion",
+      "AutoUpdate": "true",
+      "{{user `cluster_name`}}-node": "bastion",
+      "kubernetes.io/cluster/{{user `cluster_name`}}": "shared"
+    },
+    "ami_regions": ["{{user `aws_region`}}"],
+    "associate_public_ip_address": true,
+    "ssh_agent_auth": true,
+    "run_tags": {
+      "TemporaryBuildInstance": "true",
+      "Name": "{{user `cluster_name`}}-bastion-builder"
+    }
+  }],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": [
+        "sudo apt-get update",
+        "sudo apt-get upgrade -y",
+        "sudo apt-get install -y python3-pip sshpass",
+        "sudo pip3 install ansible"
+      ]
+    },
+    {
+      "type": "ansible",
+      "playbook_file": "ansible/bastion.yaml",
+      "extra_arguments": [
+        "--vault-password-file=/tmp/vault-pass"
+      ]
+    }
+  ],
+  "post-processors": [
+    {
+      "type": "shell-local",
+      "inline": [
+        "mkdir -p build-artifacts/bastion",
+        "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/bastion/kubeadm_ami_id.txt"
+      ]
+    }
+  ]
+}

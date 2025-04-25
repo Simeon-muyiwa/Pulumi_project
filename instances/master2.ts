@@ -1,7 +1,5 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
-import * as fs from "fs";
-import * as path from "path";
 import { networkOutputs } from "../network/vpc_networking";
 import { securityGroupIds } from "../network/security_group";
 import * as keyPair from "../network/key_pairs";
@@ -12,6 +10,7 @@ import {
   coreExports,
   imdsPolicy
 } from "../shared2";
+import { getAmiId } from "./ami";
 
 // IAM Role using shared configuration
 const masterRole = new aws.iam.Role("master-role", {
@@ -61,10 +60,15 @@ const masterPolicy = new aws.iam.Policy("master-policy", {
     }))
 });
 
-// IMDS Policy Attachment (aligned with index.ts pattern)
+// Attach policies
 new aws.iam.RolePolicyAttachment("master-imds-policy", {
   role: masterRole.name,
   policyArn: imdsPolicy.arn
+});
+
+new aws.iam.RolePolicyAttachment("master-custom-policy", {
+  role: masterRole.name,
+  policyArn: masterPolicy.arn
 });
 
 const masterInstanceProfile = new aws.iam.InstanceProfile("master-profile", {
@@ -72,22 +76,10 @@ const masterInstanceProfile = new aws.iam.InstanceProfile("master-profile", {
   role: masterRole.name
 });
 
-// Security Group Rule with shared OIDC domain
-new aws.ec2.SecurityGroupRule("master-oidc-egress", {
-  securityGroupId: securityGroupIds.master,
-  type: "egress",
-  fromPort: 443,
-  toPort: 443,
-  protocol: "tcp",
-  cidrBlocks: ["0.0.0.0/0"],
-  description: "OIDC provider communication"
-});
-
-// Master Instance with unified OIDC configuration
+// Master Instance with unified AMI handling
 const masterNode = new aws.ec2.Instance("master-node", {
   instanceType: "t3.medium",
-  ami: pulumi.output(fs.promises.readFile(path.join(__dirname, "kubeadm_ami_id.txt"), "utf8"))
-    .apply(amiId => amiId.trim()),
+  ami: getAmiId("master"),
   subnetId: pulumi.all(networkOutputs.privateSubnetIds).apply(
     (subnets: string[]) => subnets[0]
   ),
@@ -128,7 +120,6 @@ export const masterResources = {
   iamProfile: masterInstanceProfile
 };
 
-// Aligned exports with index.ts expectations
 export const masterPublicIp = masterNode.publicIp;
 export const masterPrivateIp = masterNode.privateIp;
 export const masterInstanceProfileName = masterInstanceProfile.name;
