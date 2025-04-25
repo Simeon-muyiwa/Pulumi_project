@@ -18,7 +18,7 @@ const ami = pulumi.output(aws.ec2.getAmi({
       values: [`k8s-${baseConfig.clusterName}-bastion-*`] 
     }],
     owners: ["self"]
-  }));
+  })).id;
 
 // Minimal IAM Role without OIDC
 const bastionRole = new aws.iam.Role("bastion-role", {
