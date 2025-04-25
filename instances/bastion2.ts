@@ -12,6 +12,14 @@ import {
   imdsPolicy
 } from "../shared2";
 
+const ami = pulumi.output(aws.ec2.getAmi({
+    filters: [{ 
+      name: "tag:Name",
+      values: [`k8s-${baseConfig.clusterName}-bastion-*`] 
+    }],
+    owners: ["self"]
+  }));
+
 // Minimal IAM Role without OIDC
 const bastionRole = new aws.iam.Role("bastion-role", {
   name: pulumi.interpolate`${baseConfig.clusterName}-bastion-role`,
@@ -96,8 +104,7 @@ const bastionSecurityGroup = new aws.ec2.SecurityGroup("bastion-sg", {
 // Bastion Instance with Unified Configuration
 const bastionHost = new aws.ec2.Instance("bastion-host", {
   instanceType: "t3.micro",
-  ami: pulumi.output(fs.promises.readFile(path.join(__dirname, "bastion_ami_id.txt"), "utf8"))
-    .apply(amiId => amiId.trim()),
+  ami: ami,
   subnetId: pulumi.all(networkOutputs.publicSubnetIds).apply(
     (subnets: string[]) => subnets[0]
   ),
