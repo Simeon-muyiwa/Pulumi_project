@@ -1,0 +1,370 @@
+name: Kubernetes Deployment
+on:
+  workflow_dispatch:
+    inputs:
+      run_packer:
+        description: "Execute Packer builds"
+        required: true
+        type: boolean
+        default: false
+      branch:
+        description: "Deployment branch"
+        required: true
+        default: "main"
+        type: choice
+        options: ["main", "develop", "release/*"]
+  push:
+    branches: [main]
+    paths:
+      - "!infrastructure/packer/**"
+      - "!ansible/kubeadm/templates/common.yaml"
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLUSTER_DOMAIN: ${{ secrets.CLUSTER_DOMAIN }}
+  PULUMI_STACK: ${{ secrets.PULUMI_STACK }}
+  GITHUB_REPO: ${{ github.repository }}
+  SOURCE_AMI: ${{ secrets.BASE_AMI }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: setup-${{ github.run_id }}
+          role-tags: |
+            Stage=Setup
+            Component=OIDC
+            Repository=${{ env.GITHUB_REPO }}
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Pulumi CLI
+        run: npm install -g @pulumi/pulumi
+
+      - name: Install System Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible packer python3 python3-pip jq
+          pip3 install boto3
+
+      - name: Generate OIDC Certificates
+        run: |
+          openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
+            -keyout cluster-oidc.key -out cluster-oidc.crt \
+            -subj "/CN=oidc.${CLUSTER_DOMAIN}" \
+            -addext "subjectAltName=DNS:oidc.${CLUSTER_DOMAIN}"
+
+          echo "CLUSTER_CERT=$(base64 -w0 cluster-oidc.crt)" >> $GITHUB_ENV
+          echo "CLUSTER_KEY=$(base64 -w0 cluster-oidc.key)" >> $GITHUB_ENV
+
+      - name: Capture Thumbprints
+        run: |
+          openssl x509 -in cluster-oidc.crt -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' > cluster-thumbprint.txt
+
+          openssl s_client -connect token.actions.githubusercontent.com:443 \
+            -servername token.actions.githubusercontent.com < /dev/null 2>/dev/null | \
+            openssl x509 -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' > github-thumbprint.txt
+
+      - name: Secure Configuration
+        uses: pulumi/actions@v4
+        with:
+          command: config set --secret
+          args: |
+            githubOidcThumbprint $(cat github-thumbprint.txt)
+            clusterOidcThumbprint $(cat cluster-thumbprint.txt)
+            clusterOidcCert ${{ env.CLUSTER_CERT }}
+            clusterOidcKey ${{ env.CLUSTER_KEY }}
+
+      - name: Archive Certificates
+        uses: actions/upload-artifact@v3
+        with:
+          name: oidc-certs
+          path: |
+            cluster-oidc.crt
+            cluster-oidc.key
+          retention-days: 1
+
+  bastion-packer-build:
+    needs: setup
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_packer == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-bastion-${{ github.run_id }}
+          role-tags: |
+            Component=Packer
+            NodeRole=bastion
+
+      - name: Build Bastion AMI
+        uses: hashicorp/packer-github-actions@v1
+        with:
+          command: build -force
+          arguments: infrastructure/packer/bastion.json
+          env_vars: |
+            AWS_SESSION_TOKEN=${{ env.AWS_SESSION_TOKEN }}
+
+      - name: Upload Bastion AMI ID
+        uses: actions/upload-artifact@v3
+        with:
+          name: bastion-ami-id
+          path: infrastructure/packer/build-artifacts/bastion/kubeadm_ami_id.txt
+          retention-days: 3
+
+  packer-build:
+    needs: bastion-packer-build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_packer == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node_role: [master, worker]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          path: "infrastructure/packer"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-${{ matrix.node_role }}-${{ github.run_id }}
+          role-tags: |
+            Component=Packer
+            NodeRole=${{ matrix.node_role }}
+
+      - name: Setup SSH Access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/deployer
+          chmod 600 ~/.ssh/deployer
+
+      - name: Build AMI
+        uses: hashicorp/packer-github-actions@v1
+        env:
+          NODE_ROLE: ${{ matrix.node_role }}
+          CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+        with:
+          command: build -force
+          arguments: infrastructure/packer/kubeadm.json
+          workdir: "infrastructure/packer"
+
+      - name: Upload AMI ID
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.node_role }}-ami-id
+          path: infrastructure/packer/build-artifacts/${{ matrix.node_role }}/kubeadm_ami_id.txt
+          retention-days: 3
+
+  pulumi-deploy:
+    needs: [packer-build, bastion-packer-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download AMI IDs
+        uses: actions/download-artifact@v3
+        with:
+          path: ami-ids
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: pulumi-${{ github.run_id }}
+          role-tags: |
+            Component=Infrastructure
+            Stage=Deploy
+
+      - name: Deploy Infrastructure
+        run: |
+          export MASTER_AMI_ID=$(cat ami-ids/master-ami-id/kubeadm_ami_id.txt)
+          export WORKER_AMI_ID=$(cat ami-ids/worker-ami-id/kubeadm_ami_id.txt)
+          export BASTION_AMI_ID=$(cat ami-ids/bastion-ami-id/kubeadm_ami_id.txt)
+          pulumi up --yes --stack ${{ env.PULUMI_STACK }}
+
+      - name: Export IRSA Configuration
+        run: |
+          pulumi stack output --json > outputs.json
+          pulumi stack output irsaConfig > irsa-roles.json
+          jq -r 'to_entries[] | "\(.key|ascii_upcase)=\(.value)"' irsa-roles.json > irsa-roles.env
+          jq -e '.ebsCSI // empty' irsa-roles.json || { echo "Missing EBS CSI role"; exit 1; }
+          jq -e '.clusterAutoscaler // empty' irsa-roles.json || { echo "Missing Autoscaler role"; exit 1; }
+          jq -r '.masterPublicIp' outputs.json > master-ip.txt
+          jq -r '.bastionIp' outputs.json > bastion-ip.txt
+          jq -r '.workerAsgName' outputs.json > worker-asg.txt
+          jq -r '.clusterIssuer' outputs.json > issuer-url.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-outputs
+          path: |
+            outputs.json
+            irsa-roles.json
+            irsa-roles.env
+            master-ip.txt
+            bastion-ip.txt
+            worker-asg.txt
+            issuer-url.txt
+          retention-days: 7
+
+  dynamic-inventory:
+    needs: pulumi-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retrieve Outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs
+          path: ./outputs
+
+      - name: Generate Inventory
+        run: |
+          python3 inventory.py \
+            "$(cat outputs/master-ip.txt)" \
+            "$(cat outputs/bastion-ip.txt)" \
+            "$(cat outputs/worker-asg.txt)" \
+            "$(cat outputs/issuer-url.txt)" > inventory.json
+
+      - name: Validate Inventory
+        run: |
+          jq -e '.k8s_master.hosts | length > 0' inventory.json || exit 1
+          jq -e '.k8s_worker.hosts | length > 0' inventory.json || exit 1
+
+      - name: Store Inventory
+        uses: actions/upload-artifact@v3
+        with:
+          name: ansible-inventory
+          path: inventory.json
+
+  ansible-deploy:
+    needs: dynamic-inventory
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Retrieve Configs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs
+          path: ./config
+
+      - name: Retrieve Inventory
+        uses: actions/download-artifact@v3
+        with:
+          name: ansible-inventory
+          path: ./inventory
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ansible-${{ github.run_id }}
+          role-tags: |
+            Component=Ansible
+            Stage=Configuration
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/deployer
+          chmod 600 ~/.ssh/deployer
+
+      - name: Execute Ansible
+        run: |
+          source ./config/irsa-roles.env
+          ansible-playbook -i inventory/inventory.json ansible/cluster-init.yml \
+            -e "irsa_roles=$(cat ./config/irsa-roles.json)" \
+            -e "cluster_issuer=$(cat ./config/issuer-url.txt)" \
+            -e "github_actions_role=${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}" \
+            -e "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
+
+  cluster-validation:
+    needs: ansible-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Cluster State
+        run: |
+          kubectl get nodes -o wide
+          kubectl -n kube-system get pods
+          kubectl get svc
+
+      - name: Validate IRSA Configurations
+        run: |
+          kubectl get serviceaccounts -n kube-system ebs-csi-controller -o json | \
+            jq -e '.metadata.annotations["eks.amazonaws.com/role-arn"]' || \
+            { echo "EBS CSI IRSA not configured"; exit 1; }
+
+          kubectl get serviceaccounts -n kube-system cluster-autoscaler -o json | \
+            jq -e '.metadata.annotations["eks.amazonaws.com/role-arn"]' || \
+            { echo "Cluster Autoscaler IRSA not configured"; exit 1; }
+
+  rollback:
+    needs: [pulumi-deploy, ansible-deploy]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rollback-${{ github.run_id }}
+          role-tags: |
+            Stage=Rollback
+
+      - name: Destroy Resources
+        run: |
+          pulumi destroy --yes --skip-preview --stack ${{ env.PULUMI_STACK }}
+          aws ec2 terminate-instances \
+            --instance-ids $(aws ec2 describe-instances \
+              --filters "Name=tag:Cluster,Values=$(cat ./config/cluster-id.txt)" \
+              --query "Reservations[].Instances[].InstanceId" \
+              --output text)
+
+      - name: Cleanup Ansible
+        run: |
+          ansible-playbook -i inventory/inventory.json ansible/rollback.yml

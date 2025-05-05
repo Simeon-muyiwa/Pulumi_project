@@ -44,9 +44,9 @@ class Ec2Inventory:
         self.bastion_public_ip = bastion_public_ip
         self.asg_name = worker_asg_name
         self.issuer_url = issuer_url
-        self.account_id = account_id  # Critical for IAM OIDC provider
-        self.role_name = role_name    # Needed for kube-apiserver --oidc-* flags
-        self.domain = domain          # Used for certificate generation
+        self.account_id = account_id
+        self.role_name = role_name
+        self.domain = domain
         self.ssh_key_path = os.path.expanduser(os.environ.get('SSH_KEY_PATH', '~/.ssh/deployer'))
         self.common_args = self._build_ssh_args()
         self.region = os.environ.get('AWS_REGION', 'eu-west-2')
@@ -113,19 +113,22 @@ class Ec2Inventory:
             "_meta": {"hostvars": {}},
             "all": {
                 "vars": {
-                    # Core OIDC Configuration
+                    # Core OIDC Configuration (aligned with shared2.ts exports)
                     "oidc_issuer_url": self.issuer_url,
                     "oidc_client_id": "sts.amazonaws.com",
                     "oidc_username_claim": "sub",
                     "oidc_groups_claim": "groups",
                     
-                    # AWS-specific Parameters
+                    # AWS-specific Parameters (from index.ts exports)
                     "aws_account_id": self.account_id,
                     "aws_region": self.region,
                     "iam_role_name": self.role_name,
                     "cluster_domain": self.domain,
                     
-                    # Common Ansible Settings
+                    # Security Context (from shared2.ts securityTags)
+                    "cluster_tag": self.cluster_tag,
+                    
+                    # Ansible Configuration
                     "ansible_user": "ubuntu",
                     "ansible_ssh_common_args": self.common_args,
                     "ansible_ssh_private_key_file": self.ssh_key_path,
@@ -148,7 +151,6 @@ class Ec2Inventory:
             inventory[group_key]["hosts"][private_ip] = {}
             inventory["_meta"]["hostvars"][private_ip] = instance
             
-            # Master-specific API server configuration
             if role == "master":
                 inventory[group_key]["vars"] = {
                     "is_control_plane": True,
@@ -158,14 +160,24 @@ class Ec2Inventory:
                         "oidc-client-id": "sts.amazonaws.com",
                         "oidc-username-claim": "sub",
                         "oidc-groups-claim": "groups",
-                        "service-account-key-file": "/etc/kubernetes/pki/sa.pub",
-                        "service-account-signing-key-file": "/etc/kubernetes/pki/sa.key",
+                        "service-account-key-file": "{{ sa_public_key }}",
+                        "service-account-signing-key-file": "{{ sa_private_key }}",
                         "api-audiences": f"sts.amazonaws.com,{self.account_id}"
+                    },
+                    # IRSA Configuration (from coreExports.irsaRoleARNs)
+                    "irsa_roles": {
+                        "ebs_csi": os.environ.get("EBS_CSI_ROLE_ARN", ""),
+                        "cluster_autoscaler": os.environ.get("CLUSTER_AUTOSCALER_ROLE_ARN", ""),
+                        "cloudwatch_agent": os.environ.get("CLOUDWATCH_AGENT_ROLE_ARN", "")
                     }
                 }
             elif role == "worker":
                 inventory[group_key]["vars"] = {
-                    "is_worker_node": True
+                    "is_worker_node": True,
+                    "node_labels": {
+                        "node.kubernetes.io/role": "worker",
+                        "topology.kubernetes.io/region": self.region
+                    }
                 }
 
         return inventory
@@ -173,23 +185,17 @@ class Ec2Inventory:
     def _collect_instances(self):
         instances = {}
         
-        # Cluster ownership filter
+        # Cluster ownership filter (matches securityTags.clusterTag)
         cluster_filter = [{
             'Name': f'tag:{self.cluster_tag}',
             'Values': ['shared', 'owned']
-        }]
-
-        # Master/worker role filter
-        role_filter = [{
-            'Name': 'tag:Role',
-            'Values': ['master', 'worker']
         }]
 
         try:
             paginator = self.ec2_paginator.paginate(
                 Filters=[
                     *cluster_filter,
-                    *role_filter,
+                    {'Name': 'tag:Role', 'Values': ['master', 'worker']},
                     {'Name': 'instance-state-name', 'Values': ['running']}
                 ]
             )
@@ -200,7 +206,7 @@ class Ec2Inventory:
         except ClientError as e:
             print(f"EC2 query error: {e}", file=sys.stderr)
 
-        # Add ASG workers if needed
+        # Add ASG workers (from workerAsgName export)
         if self.asg_name:
             try:
                 asg_instances = self.asg_client.describe_auto_scaling_instances(MaxRecords=100)

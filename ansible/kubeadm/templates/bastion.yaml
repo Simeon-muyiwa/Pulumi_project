@@ -1,5 +1,141 @@
-- hosts: all
+---
+- name: Harden Bastion Host
+  hosts: bastion
   become: true
-  roles:
-    - name: devsec.hardening.ssh_hardening
-    - name: devsec.hardening.os_hardening
+  vars:
+    # Security tuning parameters
+    sshd_config:
+      Protocol: 2
+      PermitRootLogin: "no"
+      PasswordAuthentication: "no"
+      ChallengeResponseAuthentication: "no"
+      GSSAPIAuthentication: "no"
+      UsePAM: "yes"
+      X11Forwarding: "no"
+      MaxAuthTries: 3
+      LoginGraceTime: "60"
+      ClientAliveInterval: "300"
+      ClientAliveCountMax: "2"
+      AllowAgentForwarding: "no"
+      AllowTcpForwarding: "yes" # Required for SSH tunneling
+      PermitTunnel: "yes" # Required for VPN over SSH
+      AllowUsers: "bastion-user"
+      LogLevel: "VERBOSE"
+
+    # Services to disable
+    disabled_services:
+      - rpcbind
+      - nfs-common
+      - rpc-statd
+      - avahi-daemon
+      - cups
+      - isc-dhcp-server
+      - isc-dhcp-client
+
+    # Firewall rules
+    allowed_ports:
+      - "22/tcp" # SSH
+      - "6443/tcp" # Kubernetes API (for tunneling)
+
+  tasks:
+    # Phase 1: Base Hardening
+    - name: Include OS hardening role
+      include_role:
+        name: devsec.hardening.os_hardening
+      vars:
+        os_hardening_remove_legacy_files: true
+        os_hardening_enable_module_loading: false
+
+    # Phase 2: SSH Specific Hardening
+    - name: Configure SSHd
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^{{ item.key }} "
+        line: "{{ item.key }} {{ item.value }}"
+        state: present
+      loop: "{{ sshd_config | dict2items }}"
+      notify: restart sshd
+
+    - name: Create bastion user
+      user:
+        name: bastion-user
+        groups: sudo
+        shell: /bin/bash
+        ssh_key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+
+    # Phase 3: Service Hardening
+    - name: Disable unused services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ disabled_services }}"
+
+    - name: Install and configure UFW
+      apt:
+        name: ufw
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Configure firewall rules
+      ufw:
+        rule: "{{ item.split('/')[1] | default('allow') }}"
+        port: "{{ item.split('/')[0] }}"
+        proto: "{{ item.split('/')[1] | default('tcp') }}"
+      loop: "{{ allowed_ports }}"
+      notify: enable ufw
+
+    # Phase 4: Audit Configuration
+    - name: Install auditd
+      apt:
+        name: auditd
+        state: present
+
+    - name: Configure audit rules
+      copy:
+        dest: /etc/audit/rules.d/99-bastion.rules
+        content: |
+          -a always,exit -F arch=b64 -S execve -k exec
+          -w /etc/ssh/sshd_config -p wa -k sshd_config
+          -w /var/log/auth.log -p wa -k authlog
+      notify: restart auditd
+
+    # Phase 5: Session Recording
+    - name: Install tlog for session recording
+      apt:
+        name: tlog
+        state: present
+
+    - name: Configure tlog
+      copy:
+        dest: /etc/tlog/tlog-rec-session.conf
+        content: |
+          [rec]
+          shell=/bin/bash
+          json-file=/var/log/tlog/tlog-session.log
+
+    # Phase 6: Periodic Security Updates
+    - name: Configure unattended-upgrades
+      apt:
+        name: unattended-upgrades
+        state: present
+      vars:
+        unattended_upgrades_automatic_reboot: true
+        unattended_upgrades_remove_unused_dependencies: true
+
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: ssh
+        state: restarted
+        enabled: yes
+
+    - name: enable ufw
+      command: ufw --force enable
+      async: 30
+      poll: 0
+
+    - name: restart auditd
+      systemd:
+        name: auditd
+        state: restarted

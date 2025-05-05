@@ -1,0 +1,2 @@
+sa_public_key: /etc/kubernetes/pki/sa.pub
+sa_private_key: /etc/kubernetes/pki/sa.key

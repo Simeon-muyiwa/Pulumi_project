@@ -55,7 +55,9 @@
     "type": "shell-local",
     "inline": [
       "mkdir -p build-artifacts/{{user `node_role`}}",
-      "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt"
+      "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt",
+      "sudo mkdir -p /etc/kubernetes/pki",
+      "sudo chmod 700 /etc/kubernetes/pki"
     ]
   }
 ]

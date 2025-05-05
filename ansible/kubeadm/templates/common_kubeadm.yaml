@@ -1,10 +1,27 @@
 ---
-- name: Configure Kubernetes and Docker environment
+- name: Configure Kubernetes/Docker Baseline
   hosts: all
   become: yes
+  vars:
+    containerd_version: "1.7.*"
+    k8s_version: "1.29.*"
+    sysctl_params:
+      net.bridge.bridge-nf-call-ip6tables: 1
+      net.bridge.bridge-nf-call-iptables: 1
+      net.ipv4.ip_forward: 1
+      vm.swappiness: 10
+      fs.inotify.max_user_watches: 524288
+
   tasks:
-    # Install prerequisite packages
-    - name: Install prerequisite packages
+    # Phase 1: System Preparation
+    - name: Validate Ubuntu version
+      assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version in ['20.04', '22.04']
+        msg: "Unsupported OS version"
+
+    - name: Install baseline packages
       apt:
         name:
           - curl
@@ -12,102 +29,125 @@
           - software-properties-common
           - apt-transport-https
           - ca-certificates
+          - jq
+          - nfs-common
+          - conntrack
         state: present
         update_cache: yes
         retries: 3
         delay: 10
 
-    # Add Docker GPG key
-    - name: Add Docker GPG key
-      apt_key:
-        url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
-
-    # Add Docker repository
+    # Phase 2: Containerd Configuration
     - name: Add Docker repository
       apt_repository:
-        repo: "deb [arch=arm64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        repo: "deb [arch={{ ansible_architecture }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
+        filename: docker-ce-stable
 
-    # Install containerd
-    - name: Install containerd
+    - name: Install specific containerd version
       apt:
-        name: containerd.io
+        name: "containerd.io={{ containerd_version }}"
         state: present
+        force: yes
 
-    # Set default containerd configuration
-    - name: Configure containerd
-      command: containerd config default | tee /etc/containerd/config.toml
-      creates: /etc/containerd/config.toml
-
-    # Enable and restart containerd service
-    - name: Enable and restart containerd
-      systemd:
-        name: containerd
-        enabled: yes
-        state: restarted
-
-    # Modify containerd configuration for systemd cgroup
-    - name: Modify containerd config to use systemd cgroup
-      lineinfile:
-        path: /etc/containerd/config.toml
-        regexp: "^SystemdCgroup = false"
-        line: "SystemdCgroup = true"
-
-    # Install Kubernetes components
-    - name: Install Kubernetes components (kubelet, kubeadm, kubectl)
-      apt:
-        name:
-          - kubelet
-          - kubeadm
-          - kubectl
-        state: present
-        update_cache: yes
-
-    # Hold Kubernetes packages to prevent auto-upgrades
-    - name: Mark Kubernetes packages to hold
-      apt:
-        name:
-          - kubelet
-          - kubeadm
-          - kubectl
-        state: held
-
-    # Load necessary kernel modules for containerd and Kubernetes
-    - name: Ensure necessary kernel modules are loaded (overlay and br_netfilter)
-      block:
-        - name: Add containerd kernel module configuration
-          copy:
-            dest: /etc/modules-load.d/containerd.conf
-            content: |
-              overlay
-              br_netfilter
-          notify:
-            - Load kernel modules
-
-        - name: Load kernel modules (overlay and br_netfilter)
-          command: modprobe "{{ item }}"
-          loop:
-            - overlay
-            - br_netfilter
-
-    # Apply sysctl settings for Kubernetes networking
-    - name: Configure sysctl settings for Kubernetes
+    - name: Configure containerd base template
       copy:
-        dest: /etc/sysctl.d/kubernetes.conf
+        dest: /etc/containerd/config.toml
         content: |
-          net.bridge.bridge-nf-call-ip6tables = 1
-          net.bridge.bridge-nf-call-iptables = 1
-          net.ipv4.ip_forward = 1
-      notify:
-        - Reload sysctl settings
+          version = 2
+          [plugins."io.containerd.grpc.v1.cri"]
+            systemd_cgroup = true
+            sandbox_image = "registry.k8s.io/pause:3.9"
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            snapshotter = "overlayfs"
+            disable_snapshot_annotations = false
+      notify: restart containerd
 
-  handlers:
+    # Phase 3: Kernel Tuning
     - name: Load kernel modules
-      command: modprobe "{{ item }}"
+      modprobe:
+        name: "{{ item }}"
+        state: present
       loop:
         - overlay
         - br_netfilter
+        - ip_vs
+        - ip_vs_rr
+        - ip_vs_sh
+        - nf_conntrack
 
-    - name: Reload sysctl settings
-      command: sysctl --system
+    - name: Apply sysctl parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: yes
+        reload: yes
+      loop: "{{ sysctl_params | dict2items }}"
+
+    # Phase 4: Kubernetes Installation
+    - name: Add Kubernetes repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version.split('.')[0] }}/deb/ /"
+        state: present
+        filename: kubernetes-stable
+
+    - name: Pin Kubernetes packages
+      apt_preferences:
+        filename: k8s-pin
+        package: "*"
+        pin: "version {{ k8s_version }}-*"
+        pin_priority: 1000
+
+    - name: Install kubeadm stack
+      apt:
+        name:
+          - kubelet={{ k8s_version }}
+          - kubeadm={{ k8s_version }}
+          - kubectl={{ k8s_version }}
+        state: present
+        install_recommends: no
+
+    - name: Prevent auto-upgrades
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    # Phase 5: Systemd Optimization
+    - name: Configure kubelet systemd defaults
+      copy:
+        dest: /etc/default/kubelet
+        content: |
+          KUBELET_EXTRA_ARGS="--node-ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)"
+          KUBELET_CGROUP_ARGS="--cgroup-driver=systemd"
+          KUBELET_RESERVED="--kube-reserved=cpu=250m,memory=1Gi"
+      notify: restart kubelet
+
+      - name: Ensure kubeadm PKI directory exists
+  file:
+    path: /etc/kubernetes/pki
+    state: directory
+    mode: 0700
+
+- name: Generate service account key pair
+  command: |
+    kubeadm init phase certs sa \
+      --cert-dir /etc/kubernetes/pki \
+      --config /tmp/kubeadm-config.yaml
+  when: inventory_hostname == k8s_master_host
+
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+
+    - name: restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+        enabled: yes

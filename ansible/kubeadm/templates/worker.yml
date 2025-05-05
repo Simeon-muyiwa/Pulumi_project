@@ -1,57 +1,134 @@
 ---
-- name: Worker Node Configuration
-  hosts: workers
+- name: Configure Kubernetes Worker Nodes
+  hosts: k8_workers
   become: yes
   serial: 1
+  vars_files:
+    - aws.config
+  vars:
+    kubelet_version: "1.29.*"
+    node_labels:
+      topology.kubernetes.io/zone: "{{ ansible_ec2_placement_availability_zone }}"
+      node.kubernetes.io/instance-type: "{{ ansible_ec2_instance_type }}"
+      k8s.amazonaws.com/nodepool: "default"
+
   tasks:
-    - name: Enable TCP port 6443 (On Master) is able to connect from Worker
+    # Phase 1: Pre-Join Validation
+    - name: Verify master API connectivity
       wait_for:
         host: "{{ hostvars['master'].ansible_host }}"
         port: 6443
         timeout: 60
       register: api_connect_result
-      failed_when: api_connect_result is failed
-      ignore_errors: true
+      failed_when: false
 
-    - name: Handle API Connect Failure
-      debug:
-        msg: "Failed to connect to master API. Please check the master node."
-      when: api_connect_result is failed
+    - name: Validate IAM worker profile
+      uri:
+        url: http://169.254.169.254/latest/meta-data/iam/info
+        return_content: yes
+      register: iam_metadata
+      failed_when: >
+        iam_metadata.status != 200 or
+        "'k8s-{{ CLUSTER_ID }}-worker-profile'" not in iam_metadata.content
 
+    - name: Check OIDC endpoint reachability
+      uri:
+        url: "{{ hostvars['master'].OIDC_ISSUER_URL }}/.well-known/openid-configuration"
+        return_content: yes
+        status_code: 200
+      register: oidc_check
+      until: oidc_check.status == 200
+      retries: 3
+      delay: 5
+
+    # Phase 2: Node Configuration
+    - name: Install kubelet
+      apt:
+        name: "kubelet={{ kubelet_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Configure kubelet OIDC
+      blockinfile:
+        path: /etc/kubernetes/kubelet.conf.d/oidc
+        block: |
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          kind: KubeletConfiguration
+          authentication:
+            webhook:
+              enabled: true
+            anonymous:
+              enabled: false
+          authorization:
+            mode: Webhook
+        marker: "# {mark} ANSIBLE MANAGED OIDC CONFIG"
+
+    # Phase 3: Cluster Join
     - name: Join worker to cluster
-      shell: "{{ hostvars['master'].join_command }} >> node_joined.log"
-      args:
-        chdir: /home/{{ ansible_user }}
-        creates: node_joined.log
+      command: |
+        kubeadm join {{ hostvars['master'].ansible_host }}:6443 \
+          --token {{ hostvars['master'].join_token }} \
+          --discovery-token-ca-cert-hash sha256:{{ hostvars['master'].discovery_hash }} \
+          --node-name "{{ ansible_hostname }}" \
+          --cloud-provider external \
+          --node-labels="{% for k,v in node_labels.items %}{{ k }}={{ v }}{% if not loop.last %},{% endif %}{% endfor %}"
+      environment:
+        KUBELET_EXTRA_ARGS: "--cloud-config=/etc/kubernetes/cloud-provider.conf"
+        AWS_ROLE_ARN: "arn:aws:iam::{{ account_id }}:role/{{ worker_role_name }}"
       register: join_result
-      failed_when: join_result.rc != 0
-      ignore_errors: true
+      changed_when: "'This node has joined the cluster' in join_result.stdout"
 
-    - name: Handle Join Failure
-      debug:
-        msg: "Worker failed to join the cluster. Check logs for details."
-      when: join_result is failed
-
-    - name: Verify Worker Status
-      shell: kubectl get nodes
+    # Phase 4: Post-Join Verification
+    - name: Verify node registration
+      command: kubectl get node {{ ansible_hostname }} --kubeconfig /etc/kubernetes/kubelet.conf
       register: node_status
-      failed_when: "'NotReady' in node_status.stdout"
+      until: "'Ready' in node_status.stdout"
+      retries: 10
+      delay: 15
       changed_when: false
 
-    - name: Handle Not Ready State
-      debug:
-        msg: "Worker is in NotReady state. Please investigate."
-      when: node_status is failed
+    - name: Configure cloud provider
+      template:
+        src: cloud-provider.conf.j2
+        dest: /etc/kubernetes/cloud-provider.conf
+        mode: 0644
+      notify: restart kubelet
 
-    - name: Clean Up Logs
-      file:
-        path: /home/{{ ansible_user }}/node_joined.log
-        state: absent
-      when: node_status is failed
+    - name: Apply spot instance taints
+      command: |
+        kubectl taint node {{ ansible_hostname }} \
+          spotInstance=true:NoSchedule \
+          --kubeconfig /etc/kubernetes/kubelet.conf
+      when: ansible_ec2_spot_termination_time is defined
+      changed_when: false
 
-    - name: Restart Kubernetes Services
+    # Phase 5: Optimization
+    - name: Configure network tuning
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_set: yes
+        reload: yes
+      loop:
+        - { name: net.core.somaxconn, value: 8192 }
+        - { name: net.ipv4.tcp_tw_reuse, value: 1 }
+        - { name: vm.swappiness, value: 10 }
+      when: "'t3.' in ansible_ec2_instance_type"
+
+    - name: Install termination handler
+      copy:
+        src: files/drain-node.sh
+        dest: /usr/local/bin/drain-node.sh
+        mode: 0755
+      when: ansible_ec2_spot_termination_time is defined
+
+  handlers:
+    - name: restart kubelet
       systemd:
         name: kubelet
         state: restarted
         enabled: yes
-      when: node_status is failed
+
+    - name: reload sysctl
+      command: sysctl --system
+      listen: "sysctl reload"
