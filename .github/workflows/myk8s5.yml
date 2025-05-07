@@ -80,7 +80,90 @@ jobs:
           command: config set --secret
           args: githubOidcThumbprint $(cat github-thumbprint.txt)
 
-  # ... (keep all packer-build jobs exactly as they were) ...
+  bastion-packer-build:
+    needs: setup
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_packer == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-bastion-${{ github.run_id }}
+          role-tags: |
+            Component=Packer
+            NodeRole=bastion
+
+      - name: Build Bastion AMI
+        uses: hashicorp/packer-github-actions@v1
+        with:
+          command: build -force
+          arguments: infrastructure/packer/bastion.json
+          env_vars: |
+            AWS_SESSION_TOKEN=${{ env.AWS_SESSION_TOKEN }}
+
+      - name: Upload Bastion AMI ID
+        uses: actions/upload-artifact@v3
+        with:
+          name: bastion-ami-id
+          path: infrastructure/packer/build-artifacts/bastion/kubeadm_ami_id.txt
+          retention-days: 3
+
+  packer-build:
+    needs: bastion-packer-build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_packer == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node_role: [master, worker]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          path: "infrastructure/packer"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: packer-${{ matrix.node_role }}-${{ github.run_id }}
+          role-tags: |
+            Component=Packer
+            NodeRole=${{ matrix.node_role }}
+
+      - name: Setup SSH Access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/deployer
+          chmod 600 ~/.ssh/deployer
+
+      - name: Build AMI
+        uses: hashicorp/packer-github-actions@v1
+        env:
+          NODE_ROLE: ${{ matrix.node_role }}
+          CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+        with:
+          command: build -force
+          arguments: infrastructure/packer/kubeadm.json
+          workdir: "infrastructure/packer"
+
+      - name: Upload AMI ID
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.node_role }}-ami-id
+          path: infrastructure/packer/build-artifacts/${{ matrix.node_role }}/kubeadm_ami_id.txt
+          retention-days: 3
 
   pulumi-deploy:
     needs: [packer-build, bastion-packer-build]
@@ -135,7 +218,34 @@ jobs:
             issuer-url.txt
           retention-days: 7
 
-  # ... (keep dynamic-inventory exactly as it was) ...
+  dynamic-inventory:
+    needs: pulumi-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retrieve Outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs
+          path: ./outputs
+
+      - name: Generate Inventory
+        run: |
+          python3 inventory.py \
+            "$(cat outputs/master-ip.txt)" \
+            "$(cat outputs/bastion-ip.txt)" \
+            "$(cat outputs/worker-asg.txt)" \
+            "$(cat outputs/issuer-url.txt)" > inventory.json
+
+      - name: Validate Inventory
+        run: |
+          jq -e '.k8s_master.hosts | length > 0' inventory.json || exit 1
+          jq -e '.k8s_worker.hosts | length > 0' inventory.json || exit 1
+
+      - name: Store Inventory
+        uses: actions/upload-artifact@v3
+        with:
+          name: ansible-inventory
+          path: inventory.json
 
   ansible-deploy:
     needs: dynamic-inventory
