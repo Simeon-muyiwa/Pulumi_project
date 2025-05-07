@@ -3,7 +3,8 @@
     "cluster_name": "{{env `CLUSTER_NAME`}}",
     "node_role": "{{env `NODE_ROLE`}}",
     "source_ami": "{{env `SOURCE_AMI`}}",
-    "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}"
+    "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}",
+    "k8s_version": "1.29.0"
   },
   "builders": [{
     "type": "amazon-ebs",
@@ -14,11 +15,10 @@
     "ssh_username": "ubuntu",
     "tags": {
       "Name": "{{user `cluster_name`}}-{{user `node_role`}}",
-      "{{user `cluster_name`}}-node": "{{user `node_role`}}",
-      "kubernetes.io/cluster/{{user `cluster_name`}}": "shared",
       "Component": "kubernetes",
       "AutoUpdate": "true",
-      "PackerBuilt": "true"
+      "PackerBuilt": "true",
+      "K8sVersion": "{{user `k8s_version`}}"
     },
     "ami_regions": ["{{user `aws_region`}}"],
     "associate_public_ip_address": false,
@@ -34,31 +34,39 @@
       "inline": [
         "sudo rm -rf /etc/apt/sources.list.d/docker.list",
         "sudo systemctl stop apt-daily.service",
-        "sudo systemctl kill --kill-who=all apt-daily.service"
+        "sudo systemctl kill --kill-who=all apt-daily.service",
+        "sudo cloud-init clean"
       ]
     },
     {
       "type": "ansible",
       "playbook_file": "ansible/kubeadm/templates/common.yaml",
       "extra_arguments": [
-        "--extra-vars", "node_role={{user `node_role`}}",
-        "--vault-password-file=/tmp/vault-pass"
+        "--extra-vars", 
+        "node_role={{user `node_role`}} k8s_version={{user `k8s_version`}}",
+        "--vault-password-file=/tmp/vault-pass",
+        "--tags ami_build"
       ],
       "ansible_env_vars": [
         "ANSIBLE_PIPELINING=True",
-        "ANSIBLE_REMOTE_TEMP=/tmp/.ansible"
+        "ANSIBLE_REMOTE_TEMP=/tmp/.ansible",
+        "ANSIBLE_SSH_ARGS=-o ServerAliveInterval=60"
       ]
     }
   ],
-"post-processors": [
-  {
-    "type": "shell-local",
-    "inline": [
-      "mkdir -p build-artifacts/{{user `node_role`}}",
-      "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt",
-      "sudo mkdir -p /etc/kubernetes/pki",
-      "sudo chmod 700 /etc/kubernetes/pki"
-    ]
-  }
-]
+  "post-processors": [
+    {
+      "type": "shell-local",
+      "inline": [
+        "mkdir -p build-artifacts/{{user `node_role`}}",
+        "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt",
+        "sudo find /etc/kubernetes/pki -type f -name 'sa.*' -exec shred -zu {} ;"
+      ]
+    },
+    {
+      "type": "manifest",
+      "output": "build-artifacts/{{user `node_role`}}/packer-manifest.json",
+      "strip_path": true
+    }
+  ]
 }

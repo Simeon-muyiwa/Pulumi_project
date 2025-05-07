@@ -126,18 +126,23 @@
           KUBELET_RESERVED="--kube-reserved=cpu=250m,memory=1Gi"
       notify: restart kubelet
 
-      - name: Ensure kubeadm PKI directory exists
-  file:
-    path: /etc/kubernetes/pki
-    state: directory
-    mode: 0700
-
 - name: Generate service account key pair
   command: |
     kubeadm init phase certs sa \
       --cert-dir /etc/kubernetes/pki \
       --config /tmp/kubeadm-config.yaml
-  when: inventory_hostname == k8s_master_host
+  args:
+    creates: /etc/kubernetes/pki/sa.key
+  when:
+    - node_role == "master"
+  tags: ami_build
+
+- name: Provision PKI structure
+  file:
+    path: /etc/kubernetes/pki
+    state: directory
+    mode: 0700
+  tags: ami_build
 
   handlers:
     - name: restart containerd
