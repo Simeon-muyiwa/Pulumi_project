@@ -160,3 +160,13 @@
       service:
         name: kubelet
         state: restarted
+
+- name: Configure OIDC discovery
+  hosts: k8_master
+  become: yes
+  roles:
+    - role: oidc-discovery
+      vars:
+        domain: "{{ DOMAIN }}"
+        letsencrypt_email: "{{ LETSENCRYPT_EMAIL }}"
+  when: oidc_enabled | default(true)

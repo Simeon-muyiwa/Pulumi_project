@@ -1,0 +1,80 @@
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: {{ kubectl_version | regex_replace('\*$', '') }}
+controlPlaneEndpoint: "{{ CLUSTER_ENDPOINT }}:6443"
+
+apiServer:
+  certSANs:
+  - "{{ hostvars['k8s_master'].public_ip }}"
+  - "{{ hostvars['k8s_master'].private_ip }}"
+  - "oidc.{{ DOMAIN }}"  
+  - "{{ BASTION_PUBLIC_IP }}"
+  - "{{ CLUSTER_ENDPOINT }}"
+  extraArgs:
+    service-account-issuer: "https://oidc.{{ DOMAIN }}"
+    service-account-jwks-uri: "https://oidc.{{ DOMAIN }}/openid/v1/jwks"
+    api-audiences: "sts.amazonaws.com,kubernetes.svc.default"
+    oidc-issuer-url: "https://oidc.{{ DOMAIN }}"
+    oidc-client-id: "sts.amazonaws.com"
+    oidc-username-claim: sub
+    oidc-username-prefix: "aws:"
+    oidc-groups-claim: aud
+  extraVolumes:
+  - name: oidc-ca
+    hostPath: /etc/kubernetes/pki/ca.crt
+    mountPath: /etc/kubernetes/pki/ca.crt
+    readOnly: true
+
+networking:
+  podSubnet: "{{ POD_NETWORK_CIDR }}"
+  serviceSubnet: "{{ SERVICE_CIDR }}"
+  dnsDomain: "cluster.local"
+
+
+  controllerManager:
+  extraArgs:
+     cloud-provider: external
+
+     cluster-cidr: "{{ POD_NETWORK_CIDR }}"
+    enable-admission-plugins: "NodeRestriction,PodSecurity"
+    service-account-private-key-file: /etc/kubernetes/pki/sa.key
+    root-ca-file: /etc/kubernetes/pki/ca.crt
+    authorization-mode: "Node,RBAC"
+    allocate-node-cidrs: "true"
+    node-cidr-mask-size: "24"
+    service-cluster-ip-range: "{{ SERVICE_CIDR }}"
+scheduler:
+  extraArgs: {}
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+    extraArgs:
+      listen-client-urls: "https://127.0.0.1:{{ etcd_client_port }},https://{{ ansible_default_ipv4.address }}:{{ etcd_client_port }}"
+      advertise-client-urls: "https://{{ ansible_default_ipv4.address }}:{{ etcd_client_port }}"
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  name: "{{ inventory_hostname }}"
+  kubeletExtraArgs:
+    cloud-provider: external
+    cloud-config: /etc/kubernetes/cloud-provider.conf
+    read-only-port: "0"
+    event-qps: "0"
+    protect-kernel-defaults: "true"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failSwapOn: false
+readOnlyPort: 0
+serializeImagePulls: false
+clusterDomain: "cluster.local"
+
+
+# Add to controllerManager.extraArgs
+controllerManager:
+  extraArgs:
+    service-account-private-key-file: /etc/kubernetes/pki/sa.key
+    root-ca-file: /etc/kubernetes/pki/ca.crt

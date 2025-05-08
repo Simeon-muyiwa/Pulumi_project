@@ -1,0 +1,36 @@
+---
+- name: Verify TLS certificate issuance
+  kubernetes.core.k8s_info:
+    kind: Secret
+    namespace: kube-system
+    name: "{{ tls_secret_name }}"
+  register: tls_secret
+  until: tls_secret.resources | length > 0
+  retries: 10
+  delay: 15
+
+- name: Validate certificate DNS
+  command: |
+    openssl x509 -noout -text -in <(kubectl get secret {{ tls_secret_name }} -n kube-system -o jsonpath='{.data.tls\.crt}' | base64 -d) | grep DNS
+  register: cert_dns
+  failed_when: "'{{ oidc_domain }}' not in cert_dns.stdout"
+
+- name: Test OIDC discovery endpoint
+  uri:
+    url: https://{{ oidc_domain }}/.well-known/openid-configuration
+    validate_certs: yes
+    status_code: 200
+    headers:
+      Accept: application/json
+  register: oidc_validation
+  until: oidc_validation.status == 200
+  retries: 5
+  delay: 10
+
+- name: Verify JWKS endpoint
+  uri:
+    url: "{{ oidc_validation.json.jwks_uri }}"
+    validate_certs: yes
+    status_code: 200
+  register: jwks_check
+  failed_when: jwks_check.status != 200

@@ -1,0 +1,14 @@
+# Required Variables
+oidc_domain: "oidc.{{ domain }}"
+cert_manager_version: "v1.13.1"
+letsencrypt_email: "security@{{ domain }}"
+tls_secret_name: "oidc-tls"
+api_server_service: "kubernetes"
+api_server_port: 443
+# Required
+# domain: yourdomain.com
+# letsencrypt_email: security@yourdomain.com
+
+# # Optional
+# oidc_enabled: true
+# tls_secret_name: "oidc-tls-prod"

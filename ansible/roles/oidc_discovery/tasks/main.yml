@@ -1,0 +1,82 @@
+---
+- name: Install cert-manager
+  kubernetes.core.helm:
+    name: cert-manager
+    chart_ref: cert-manager
+    repo_url: https://charts.jetstack.io
+    version: "{{ cert_manager_version }}"
+    namespace: cert-manager
+    create_namespace: yes
+    release_values:
+      installCRDs: true
+      securityContext:
+        enabled: true
+        fsGroup: 1001
+  register: cert_manager_install
+
+- name: Create Let's Encrypt ClusterIssuer
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'oidc-cluster-issuer.yaml.j2') | from_yaml }}"
+  when: cert_manager_install.chart.status == 'deployed'
+
+- name: Deploy OIDC discovery ingress
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'oidc-ingress.yaml.j2') | from_yaml }}"
+  notify: Reload ingress-nginx
+
+- name: Generate discovery documents
+  block:
+    - name: Create OIDC directory
+      file:
+        path: /etc/kubernetes/oidc
+        state: directory
+        mode: 0755
+
+    - name: Deploy discovery document
+      template:
+        src: oidc-discovery.json.j2
+        dest: /etc/kubernetes/oidc/.well-known/openid-configuration
+        mode: 0644
+
+    - name: Link cluster CA
+      file:
+        src: /etc/kubernetes/pki/ca.crt
+        dest: /etc/kubernetes/oidc/ca.crt
+        state: link
+  when: "'master' in group_names"
+
+- name: Validate TLS certificate
+  include_tasks: validate.yml
+
+- name: Verify API server configuration
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: kube-system
+    label_selectors:
+      - component = kube-apiserver
+  register: kube_apiserver_pods
+
+- name: Ensure OIDC flags are present
+  command: grep -qE 'service-account-issuer|oidc-issuer-url' /etc/kubernetes/manifests/kube-apiserver.yaml
+  changed_when: false
+  failed_when: false
+  register: apiserver_check
+
+- name: Update API server configuration
+  when: apiserver_check.rc != 0
+  block:
+    - name: Patch kube-apiserver manifest
+      replace:
+        path: /etc/kubernetes/manifests/kube-apiserver.yaml
+        regexp: "^(    - --authorization-mode=.*)"
+        replace: |-
+          \1
+            - --service-account-issuer=https://{{ oidc_domain }}
+            - --service-account-jwks-uri=https://{{ oidc_domain }}/openid/v1/jwks
+            - --api-audiences=sts.amazonaws.com,kubernetes.svc.default
+      notify: Restart api-server
+
+    - name: Flush handlers
+      meta: flush_handlers

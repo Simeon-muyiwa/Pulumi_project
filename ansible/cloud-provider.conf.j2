@@ -1,0 +1,28 @@
+[Global]
+VPC = "{{ vpc_id }}"
+Zone = "{{ ansible_ec2_placement_availability_zone }}"
+KubernetesClusterTag = "{{ cluster_tag }}"
+ClusterName = "{{ cluster_name }}"
+ClusterID = "{{ cluster_id }}"
+
+[AWS]
+APIRetryQPS = 10
+APIBurstQPS = 20
+APIMaxRetries = 8
+AWSMetadataIP = "169.254.169.254"
+AWSRegion = "{{ aws_region }}"
+AWSUseInstanceMetadata = false
+AWSEnableInfrastructureEncryption = true
+TagClusterResources = true
+DisableSecurityGroupIngress = false
+ElbSecurityGroup = "{{ security_group_id }}"
+DisableAPITermination = false
+InstanceCacheTTL = 300
+
+[RouteTable]
+ClusterSubnetTags = "kubernetes.io/cluster/{{ cluster_name }}=shared"
+RoutingTableSyncPeriod = "5m"
+
+[Service]
+MaxConcurrentOperations = 50
+OperationWaitDuration = "5s"

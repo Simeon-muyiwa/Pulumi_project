@@ -1,0 +1,11 @@
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: {{ kubelet_config.cgroupDriver }}
+protectKernelDefaults: {{ kubelet_config.protectKernelDefaults }}
+readOnlyPort: {{ kubelet_config.readOnlyPort }}
+authentication:
+  x509:
+    clientCAFile: {{ kubelet_config.authentication.x509.clientCAFile }}
+authorization:
+  mode: {{ kubelet_config.authorization.mode }}
+serverTLSBootstrap: true  # Required for certificate rotation

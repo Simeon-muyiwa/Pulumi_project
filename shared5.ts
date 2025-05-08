@@ -57,99 +57,94 @@ export const securityTags = {
 // Permission Boundary
 // ========================
 export const permissionBoundary = new aws.iam.Policy("k8sPermissionBoundary", {
-  name: pulumi.interpolate`${baseConfig.clusterName}-boundary`,
-  policy: aws.iam.getPolicyDocumentOutput({
-    version: "2012-10-17",
-    statements: [
-      {
-        effect: "Allow",
-        actions: [
-          "ec2:Describe*",
-          "autoscaling:Describe*",
-          "iam:ListInstanceProfilesForRole"
-        ],
-        resources: ["*"],
-        condition: {
-          StringEquals: {
-            [`aws:ResourceTag/${securityTags.clusterTag(baseConfig.clusterName)}`]: "shared"
+    name: pulumi.interpolate`${baseConfig.clusterName}-boundary`,
+    policy: pulumi.jsonStringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: [
+            "ec2:Describe*",
+            "autoscaling:Describe*",
+            "iam:ListInstanceProfilesForRole"
+          ],
+          Resource: "*",
+          Condition: {
+            StringEquals: {
+              [`aws:ResourceTag/${securityTags.clusterTag(baseConfig.clusterName)}`]: "shared"
+            }
+          }
+        },
+        {
+          Effect: "Allow",
+          Action: ["route53:ChangeResourceRecordSets"],
+          Resource: pulumi.interpolate`arn:aws:route53:::hostedzone/${baseConfig.dnsZoneId}`
+        }
+      ]
+    }),
+    tags: securityTags.baseTags
+  });
+
+// ====================
+// IMDS Security Policy
+// ====================
+export const imdsPolicy = new aws.iam.Policy("imds-control", {
+    name: pulumi.interpolate`${baseConfig.clusterName}-imds`,
+    policy: JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Deny",
+        Action: ["ec2:ModifyInstanceMetadataOptions"],
+        Resource: "*",
+        Condition: {
+          StringNotEquals: {
+            "ec2:MetadataHttpTokens": "required"
           }
         }
-      },
-      {
-        effect: "Allow",
-        actions: ["route53:ChangeResourceRecordSets"],
-        resources: [pulumi.interpolate`arn:aws:route53:::hostedzone/${baseConfig.dnsZoneId}`]
-      }
-    ]
-  }).apply(doc => JSON.stringify(doc)),
-  tags: securityTags.baseTags
-});
-
-// ========================
-// IMDS Security Policy
-// ========================
-export const imdsPolicy = new aws.iam.Policy("imds-control", {
-  name: pulumi.interpolate`${baseConfig.clusterName}-imds`,
-  policy: aws.iam.getPolicyDocumentOutput({
-    version: "2012-10-17",
-    statements: [{
-      effect: "Deny",
-      actions: ["ec2:ModifyInstanceMetadataOptions"],
-      resources: ["*"],
-      conditions: {
-        StringEquals: {
-          "ec2:MetadataHttpTokens": "required"
-        }
-      }
-    }]
-  }).apply(doc => JSON.stringify(doc)),
-  tags: securityTags.baseTags
-});
+      }]
+    }),
+    tags: securityTags.baseTags
+  });
 
 // ========================
 // Namespace Policies
 // ========================
 const namespacePolicies = {
-  storage: new aws.iam.Policy("namespace-storage", {
-    policy: aws.iam.getPolicyDocumentOutput({
-      version: "2012-10-17",
-      statements: [{
-        effect: "Allow",
-        actions: [
-          "ec2:CreateVolume",
-          "ec2:AttachVolume",
-          "ec2:DetachVolume",
-          "ec2:DeleteVolume"
-        ],
-        resources: ["*"],
-        conditions: {
-          StringEquals: {
-            "aws:RequestTag/ManagedBy": "pulumi"
+    storage: new aws.iam.Policy("namespace-storage", {
+      policy: pulumi.jsonStringify({
+        Version: "2012-10-17",
+        Statement: [{
+          Effect: "Allow",
+          Action: ["ec2:*Volume", "ec2:Attach*", "ec2:Detach*"],
+          Resource: "*",
+          Condition: {
+            StringEquals: {
+              "aws:RequestTag/ManagedBy": "pulumi"
+            }
           }
-        }
-      }]
-    }).apply(doc => JSON.stringify(doc))
-  }),
-  autoscaling: new aws.iam.Policy("namespace-autoscaling", {
-    policy: aws.iam.getPolicyDocumentOutput({
-      version: "2012-10-17",
-      statements: [{
-        effect: "Allow",
-        actions: ["autoscaling:*"],
-        resources: [pulumi.interpolate`arn:aws:autoscaling:*:${baseConfig.accountId}:*`]
-      }]
-    }).apply(doc => JSON.stringify(doc))
-  })
-};
+        }]
+      })
+    }),
+    autoscaling: new aws.iam.Policy("namespace-autoscaling", {
+      policy: pulumi.jsonStringify({
+        Version: "2012-10-17",
+        Statement: [{
+          Effect: "Allow",
+          Action: "autoscaling:*",
+          Resource: pulumi.interpolate`arn:aws:autoscaling:*:${baseConfig.accountId}:*`
+        }]
+      })
+    })
+  };
 
 // ========================
 // Managed Policy Refs
 // ========================
 const managedPolicies = {
-  ebsCSI: aws.iam.ManagedPolicy.AmazonEBSCSIDriverPolicy,
-  cloudWatch: aws.iam.ManagedPolicy.CloudWatchAgentServerPolicy,
-  readOnly: aws.iam.ManagedPolicy.ReadOnlyAccess
-};
+    ebsCSI: pulumi.output(aws.iam.ManagedPolicy.AmazonEBSCSIDriverPolicy),
+    cloudWatch: pulumi.output(aws.iam.ManagedPolicy.CloudWatchAgentServerPolicy),
+    readOnly: pulumi.output(aws.iam.ManagedPolicy.ReadOnlyAccess)
+  };
 
 // ===================
 // OIDC Providers

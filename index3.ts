@@ -38,19 +38,33 @@ export const clusterTag = securityTags.clusterTag(clusterId);
 // ======================
 // Infrastructure Outputs
 // ======================
+// export const infrastructure = {
+//   master: {
+//     publicIp: masterResources.details.publicIp,
+//     privateIp: masterResources.details.privateIp,
+//     // roleName: masterResources.iamProfile.role.name,
+//     roleName: pulumi.output(masterResources.iamProfile.role).apply(r => r?.valueOf.name)
+//   },
+//   worker: {
+//     asgName: workerResources.autoScalingGroup.name
+//   },
+//   bastion: {
+//     publicIp: bastionResources.details.publicIp
+//   }
+// };
+
+// Infrastructure exports
+export const masterPublicIp = masterResources.details.publicIp;
+export const masterPrivateIp = masterResources.details.privateIp;
+export const workerAsgName = workerResources.autoScalingGroup;
+export const bastionIp = bastionResources.details.publicIp;
+export const roleName = pulumi.output(masterResources.iamProfile.role).apply(r => r?.valueOf.name);
+
 export const infrastructure = {
-  master: {
-    publicIp: masterResources.details.publicIp,
-    privateIp: masterResources.details.privateIp,
-    // roleName: masterResources.iamProfile.role.name,
-    roleName: pulumi.output(masterResources.iamProfile.role).apply(r => r?.valueOf.name)
-  },
-  worker: {
-    asgName: workerResources.autoScalingGroup.name
-  },
-  bastion: {
-    publicIp: bastionResources.details.publicIp
-  }
+  master: masterResources,
+  worker: workerResources,
+  bastion: bastionResources,
+  _tags: securityTags.baseTags
 };
 
 // ====================

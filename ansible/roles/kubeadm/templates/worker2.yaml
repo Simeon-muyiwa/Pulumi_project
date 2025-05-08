@@ -1,0 +1,109 @@
+---
+- name: Configure Kubernetes Worker Nodes
+  hosts: k8_workers
+  become: yes
+  serial: 1
+  vars_files:
+    - aws.config
+  vars:
+    kubelet_version: "1.29.*"
+    node_labels:
+      topology.kubernetes.io/zone: "{{ ansible_ec2_placement_availability_zone }}"
+      node.kubernetes.io/instance-type: "{{ ansible_ec2_instance_type }}"
+      k8s.amazonaws.com/nodepool: "default"
+    kubelet_config: # Aligns with master config
+      cgroupDriver: systemd
+      protectKernelDefaults: true
+      readOnlyPort: 0
+      authentication:
+        x509:
+          clientCAFile: /etc/kubernetes/pki/ca.crt
+      authorization:
+        mode: Webhook
+
+  tasks:
+    # Phase 1: Security Foundation
+    - name: Configure kubelet trusted CAs
+      copy:
+        src: /etc/kubernetes/pki/ca.crt # Inherited from master
+        dest: /etc/kubernetes/pki/ca.crt
+        mode: 0644
+
+    # Phase 2: Kubelet Security Configuration
+    - name: Configure kubelet security
+      template:
+        src: kubelet-config.yaml.j2
+        dest: /var/lib/kubelet/config.yaml
+        mode: 0644
+      notify: restart kubelet
+
+    # Phase 3: Cluster Join with IRSA Alignment
+    - name: Join worker to cluster
+      command: |
+        kubeadm join {{ CLUSTER_ENDPOINT }}:6443 \
+          --token {{ hostvars['master'].join_token }} \
+          --discovery-token-ca-cert-hash sha256:{{ hostvars['master'].discovery_hash }} \
+          --node-name "{{ ansible_hostname }}" \
+          --cloud-provider external \
+          --node-labels="{% for k,v in node_labels.items %}{{ k }}={{ v }}{% if not loop.last %},{% endif %}{% endfor %}" \
+          --config /etc/kubernetes/kubeadm-join.yaml
+      environment:
+        KUBELET_ARGS: |
+          --cloud-config=/etc/kubernetes/cloud-provider.conf
+          --cert-dir=/var/lib/kubelet/pki
+          --rotate-certificates=true
+          --authorization-mode=Webhook  # Required for IRSA
+      register: join_result
+      changed_when: "'This node has joined the cluster' in join_result.stdout"
+
+    # Phase 4: IRSA Pod Identity Validation
+    - name: Configure OIDC trust chain
+      block:
+        - name: Update CA trust store
+          copy:
+            src: /etc/kubernetes/pki/ca.crt
+            dest: /usr/local/share/ca-certificates/k8s-ca.crt
+            mode: 0644
+          notify: update ca certs
+
+        - name: Verify API server identity
+          command: |
+            openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt \
+              <(echo | openssl s_client -connect {{ CLUSTER_ENDPOINT }}:443 2>/dev/null)
+          register: ssl_verify
+          failed_when: ssl_verify.rc != 0
+
+    # Phase 5: Compliance Checks
+    - name: Validate worker IAM profile
+      uri:
+        url: http://169.254.169.254/latest/meta-data/iam/info
+        return_content: yes
+      register: iam_metadata
+      failed_when: >
+        iam_metadata.status != 200 or
+        'InstanceProfileArn' not in iam_metadata.content or
+        not iam_metadata.content | regex_search('k8s-{{ CLUSTER_ID }}-worker-profile')
+
+    - name: Verify OIDC endpoint trust
+      uri:
+        url: "https://oidc.{{ DOMAIN }}/.well-known/openid-configuration"
+        return_content: yes
+        status_code: 200
+      register: oidc_check
+      until: oidc_check.status == 200
+      retries: 5
+      delay: 10
+
+  handlers:
+    - name: update ca certs
+      command: update-ca-certificates
+
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+
+    - name: restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted

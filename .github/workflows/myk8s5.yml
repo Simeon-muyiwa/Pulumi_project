@@ -287,8 +287,9 @@ jobs:
           source ./config/irsa-roles.env
           ansible-playbook -i inventory/inventory.json ansible/cluster-init.yml \
             -e "irsa_roles=$(cat ./config/irsa-roles.json)" \
-            -e "cluster_issuer=$(cat ./config/issuer-url.txt)" \
-            -e "github_actions_role=${{ secrets.GITHUB_ACTIONS_ROLE_ARN }}" \
+            # -e "cluster_issuer=$(cat ./config/issuer-url.txt)" \
+            -e "cluster_issuer=$(pulumi stack output clusterIssuer)" \
+            -e "github_actions_role=$(pulumi stack output githubActionsConfig.AWS_ROLE_ARN)" \
             -e "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
 
       - name: Store Cluster Endpoint

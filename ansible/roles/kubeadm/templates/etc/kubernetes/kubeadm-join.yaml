@@ -1,0 +1,16 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "{{ CLUSTER_ENDPOINT }}:6443"
+    token: "{{ hostvars['master'].join_token }}"
+    caCertHashes:
+      - sha256:{{ hostvars['master'].discovery_hash }}
+nodeRegistration:
+  name: "{{ ansible_hostname }}"
+  kubeletExtraArgs:
+    cloud-provider: external
+    cloud-config: /etc/kubernetes/cloud-provider.conf
+    read-only-port: "0"
+    event-qps: "0"
+    protect-kernel-defaults: "true"
