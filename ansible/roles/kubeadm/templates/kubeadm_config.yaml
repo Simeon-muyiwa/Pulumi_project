@@ -12,18 +12,30 @@ apiServer:
   - "{{ BASTION_PUBLIC_IP }}"
   - "{{ CLUSTER_ENDPOINT }}"
   extraArgs:
+    # Core OIDC Configuration
     service-account-issuer: "https://oidc.{{ DOMAIN }}"
+    service-account-signing-key-file: /etc/kubernetes/pki/sa.key
     service-account-jwks-uri: "https://oidc.{{ DOMAIN }}/openid/v1/jwks"
-    api-audiences: "sts.amazonaws.com,kubernetes.svc.default"
+    service-account-key-file: /etc/kubernetes/pki/sa.pub
+    
+    # Audience Configuration
+    api-audiences: "sts.amazonaws.com,https://kubernetes.default.svc"
+    
+    # OIDC Provider Settings
     oidc-issuer-url: "https://oidc.{{ DOMAIN }}"
     oidc-client-id: "sts.amazonaws.com"
     oidc-username-claim: sub
     oidc-username-prefix: "aws:"
     oidc-groups-claim: aud
+    
+    # Security Enhancements
+    service-account-lookup: "true"
+    service-account-max-token-expiration: "86400"
+    
   extraVolumes:
-  - name: oidc-ca
-    hostPath: /etc/kubernetes/pki/ca.crt
-    mountPath: /etc/kubernetes/pki/ca.crt
+  - name: sa-keys
+    hostPath: /etc/kubernetes/pki
+    mountPath: /etc/kubernetes/pki
     readOnly: true
 
 networking:
@@ -31,12 +43,10 @@ networking:
   serviceSubnet: "{{ SERVICE_CIDR }}"
   dnsDomain: "cluster.local"
 
-
-  controllerManager:
+controllerManager:
   extraArgs:
-     cloud-provider: external
-
-     cluster-cidr: "{{ POD_NETWORK_CIDR }}"
+    cloud-provider: external
+    cluster-cidr: "{{ POD_NETWORK_CIDR }}"
     enable-admission-plugins: "NodeRestriction,PodSecurity"
     service-account-private-key-file: /etc/kubernetes/pki/sa.key
     root-ca-file: /etc/kubernetes/pki/ca.crt
@@ -44,8 +54,12 @@ networking:
     allocate-node-cidrs: "true"
     node-cidr-mask-size: "24"
     service-cluster-ip-range: "{{ SERVICE_CIDR }}"
+    # Token Controller Configuration
+    service-account-jwt-key-file: /etc/kubernetes/pki/sa.pub
+
 scheduler:
   extraArgs: {}
+
 etcd:
   local:
     dataDir: /var/lib/etcd
@@ -63,6 +77,8 @@ nodeRegistration:
     read-only-port: "0"
     event-qps: "0"
     protect-kernel-defaults: "true"
+    # Required for projected tokens
+    feature-gates: "RotateKubeletServerCertificate=true"
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
@@ -71,10 +87,14 @@ failSwapOn: false
 readOnlyPort: 0
 serializeImagePulls: false
 clusterDomain: "cluster.local"
+# Critical for IRSA token validation
+authentication:
+  x509:
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+  webhook:
+    enabled: true
+  anonymous:
+    enabled: false
+authorization:
+  mode: Webhook
 
-
-# Add to controllerManager.extraArgs
-controllerManager:
-  extraArgs:
-    service-account-private-key-file: /etc/kubernetes/pki/sa.key
-    root-ca-file: /etc/kubernetes/pki/ca.crt

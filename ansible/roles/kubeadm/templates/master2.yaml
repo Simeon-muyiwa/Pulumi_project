@@ -23,18 +23,6 @@
           - ansible_os_family == 'Debian'
         msg: "Insufficient resources or unsupported OS"
 
-    # Phase 2: Package Installation
-    - name: Install Kubernetes binaries
-      apt:
-        name:
-          - kubelet={{ kubectl_version }}
-          - kubeadm={{ kubectl_version }}
-          - kubectl={{ kubectl_version }}
-          - jq
-          - awscli
-        state: present
-        update_cache: yes
-
     # Phase 3: Configuration Generation
     - name: Generate kubeadm config
       template:
@@ -170,3 +158,12 @@
         domain: "{{ DOMAIN }}"
         letsencrypt_email: "{{ LETSENCRYPT_EMAIL }}"
   when: oidc_enabled | default(true)
+
+- name: Deploy secure cloud-provider config
+  template:
+    src: cloud-provider.conf.j2
+    dest: /etc/kubernetes/cloud-provider.conf
+    mode: 0600 # Restrictive permissions
+  notify: restart kubelet
+  vars:
+    cluster_tag: "{{ security_tags.cluster_tag(base_config.clusterName) }}"

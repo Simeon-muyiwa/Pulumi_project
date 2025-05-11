@@ -25,6 +25,7 @@
       apt:
         name:
           - curl
+          - awscli
           - gnupg2
           - software-properties-common
           - apt-transport-https
