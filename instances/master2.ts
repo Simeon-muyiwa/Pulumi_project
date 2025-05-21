@@ -86,10 +86,6 @@ const masterNode = new aws.ec2.Instance("master-node", {
   vpcSecurityGroupIds: [securityGroupIds.master],
   iamInstanceProfile: masterInstanceProfile.name,
   keyName: keyPair.deployer.keyName,
-  userData: pulumi.interpolate`#!/bin/bash
-  echo "OIDC_ISSUER_URL=${coreExports.oidcDomain}" >> /etc/kubernetes/apiserver.env
-  systemctl restart kube-apiserver
-  `,
   tags: {
     ...securityTags.baseTags,
     role: "master",
@@ -100,7 +96,9 @@ const masterNode = new aws.ec2.Instance("master-node", {
   },
   metadataOptions: {
     httpTokens: "required",
-    httpEndpoint: "enabled"
+    httpEndpoint: "enabled",
+    httpPutResponseHopLimit: 2,  // Prevent metadata leakage
+    instanceMetadataTags: "enabled"
   },
   rootBlockDevice: {
     volumeSize: 50,

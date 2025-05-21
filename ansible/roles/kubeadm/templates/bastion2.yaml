@@ -3,7 +3,7 @@
   hosts: bastion
   become: true
   vars:
-    # Security tuning parameters
+    bastion_user: "bastion-user"
     sshd_config:
       Protocol: 2
       PermitRootLogin: "no"
@@ -17,13 +17,10 @@
       ClientAliveInterval: "300"
       ClientAliveCountMax: "2"
       AllowAgentForwarding: "no"
-      AllowTcpForwarding: "yes" # Required for SSH tunneling
-      PermitTunnel: "yes" # Required for VPN over SSH
+      AllowTcpForwarding: "yes"
+      PermitTunnel: "yes"
       PermitOpen: "{{ CLUSTER_ENDPOINT }}:6443"
-      AllowUsers: "bastion-user"
       LogLevel: "VERBOSE"
-
-    # Services to disable
     disabled_services:
       - rpcbind
       - nfs-common
@@ -32,14 +29,11 @@
       - cups
       - isc-dhcp-server
       - isc-dhcp-client
-
-    # Firewall rules
     allowed_ports:
-      - "22/tcp" # SSH
-      - "6443/tcp" # Kubernetes API (for tunneling)
+      - "22/tcp"
+      - "6443/tcp"
 
   tasks:
-    # Phase 1: Base Hardening
     - name: Include OS hardening role
       include_role:
         name: devsec.hardening.os_hardening
@@ -47,24 +41,32 @@
         os_hardening_remove_legacy_files: true
         os_hardening_enable_module_loading: false
 
-    # Phase 2: SSH Specific Hardening
     - name: Configure SSHd
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: "^{{ item.key }} "
         line: "{{ item.key }} {{ item.value }}"
         state: present
-      loop: "{{ sshd_config | dict2items }}"
+      loop: >-
+        {{ sshd_config | dict2items | combine({'AllowUsers': 'ubuntu ' + bastion_user}) }}
       notify: restart sshd
+      when: is_packer_build | default(false)
 
-    - name: Create bastion user
-      user:
-        name: bastion-user
-        groups: sudo
-        shell: /bin/bash
-        ssh_key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+    - name: Final SSH hardening
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^AllowUsers "
+        line: "AllowUsers {{ bastion_user }}"
+        state: present
+      notify: restart sshd
+      when: not (is_packer_build | default(false))
 
-    # Phase 3: Service Hardening
+    - name: Remove temporary sudo access
+      file:
+        path: /etc/sudoers.d/90-bastion-init
+        state: absent
+      when: is_packer_build | default(false)
+
     - name: Disable unused services
       systemd:
         name: "{{ item }}"
@@ -72,13 +74,7 @@
         enabled: no
       loop: "{{ disabled_services }}"
 
-    - name: Install and configure UFW
-      apt:
-        name: ufw
-        state: present
-      when: ansible_os_family == 'Debian'
-
-    - name: Configure firewall rules
+    - name: Configure host firewall
       ufw:
         rule: "{{ item.split('/')[1] | default('allow') }}"
         port: "{{ item.split('/')[0] }}"
@@ -86,39 +82,36 @@
       loop: "{{ allowed_ports }}"
       notify: enable ufw
 
-    # Phase 4: Audit Configuration
-    - name: Install auditd
+    - name: Install audit tools
       apt:
         name: auditd
         state: present
 
-    - name: Configure audit rules
+    - name: Deploy audit rules
       copy:
         dest: /etc/audit/rules.d/99-bastion.rules
         content: |
           -a always,exit -F arch=b64 -S execve -k exec
           -w /etc/ssh/sshd_config -p wa -k sshd_config
           -w /var/log/auth.log -p wa -k authlog
-          -w /var/log/tlog/ -p wa -k tlog_session
           -w /etc/kubernetes/ -p wa -k k8s_config
       notify: restart auditd
 
-    # Phase 5: Session Recording
-    - name: Install tlog for session recording
+    - name: Install session recording tools
       apt:
         name: tlog
         state: present
 
-    - name: Configure tlog
+    - name: Configure session logging
       copy:
         dest: /etc/tlog/tlog-rec-session.conf
         content: |
           [rec]
           shell=/bin/bash
+          user="{{ bastion_user }}"
           json-file=/var/log/tlog/tlog-session.log
 
-    # Phase 6: Periodic Security Updates
-    - name: Configure unattended-upgrades
+    - name: Enable automatic security updates
       apt:
         name: unattended-upgrades
         state: present
@@ -126,12 +119,27 @@
         unattended_upgrades_automatic_reboot: true
         unattended_upgrades_remove_unused_dependencies: true
 
+    - name: Transfer Packer provisioning key
+      ansible.posix.authorized_key:
+        user: "{{ bastion_user }}"
+        key: "{{ lookup('file', '/home/' + bastion_user + '/.ssh/authorized_keys') }}"
+        state: present
+      when:
+        - ansible_user != bastion_user
+        - is_packer_build | default(false)
+      tags: packer
+
+    - name: Enforce user account policies
+      shell: |
+        chage -E $(date -d "+90 days" +%Y-%m-%d) -m 1 -M 90 -W 14 "{{ bastion_user }}"
+        faillock --user "{{ bastion_user }}" --reset
+      changed_when: false
+
   handlers:
     - name: restart sshd
       systemd:
         name: ssh
         state: restarted
-        enabled: yes
 
     - name: enable ufw
       command: ufw --force enable

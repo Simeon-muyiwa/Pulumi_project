@@ -202,7 +202,6 @@ jobs:
           jq -r '.masterPublicIp' outputs.json > master-ip.txt
           jq -r '.bastionIp' outputs.json > bastion-ip.txt
           jq -r '.workerAsgName' outputs.json > worker-asg.txt
-          jq -r '.clusterIssuer' outputs.json > issuer-url.txt
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v3
@@ -215,7 +214,6 @@ jobs:
             master-ip.txt
             bastion-ip.txt
             worker-asg.txt
-            issuer-url.txt
           retention-days: 7
 
   dynamic-inventory:
@@ -233,8 +231,7 @@ jobs:
           python3 inventory.py \
             "$(cat outputs/master-ip.txt)" \
             "$(cat outputs/bastion-ip.txt)" \
-            "$(cat outputs/worker-asg.txt)" \
-            "$(cat outputs/issuer-url.txt)" > inventory.json
+            "$(cat outputs/worker-asg.txt)" > inventory.json
 
       - name: Validate Inventory
         run: |
@@ -287,50 +284,74 @@ jobs:
           source ./config/irsa-roles.env
           ansible-playbook -i inventory/inventory.json ansible/cluster-init.yml \
             -e "irsa_roles=$(cat ./config/irsa-roles.json)" \
-            # -e "cluster_issuer=$(cat ./config/issuer-url.txt)" \
-            -e "cluster_issuer=$(pulumi stack output clusterIssuer)" \
             -e "github_actions_role=$(pulumi stack output githubActionsConfig.AWS_ROLE_ARN)" \
             -e "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
 
-      - name: Store Cluster Endpoint
+      - name: Capture Live OIDC Issuer
         run: |
-          echo "CLUSTER_ENDPOINT=$(cat config/issuer-url.txt)" >> $GITHUB_ENV
+          sleep 30 # Wait for API stability
+          kubectl get --raw /.well-known/openid-configuration | jq -r '.issuer' > issuer-url.txt
+          echo "Cluster Issuer URL: $(cat issuer-url.txt)"
+
+      - name: Update Deployment Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-outputs
+          path: issuer-url.txt
+          overwrite: true
 
   extract-thumbprint:
     needs: ansible-deploy
     runs-on: ubuntu-latest
     steps:
-      - name: Retrieve Master IP
+      - name: Retrieve Cluster Endpoint
         uses: actions/download-artifact@v3
         with:
           name: deployment-outputs
           path: ./config
 
-      - name: Install SSH Key
+      - name: Extract OIDC Hostname
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/cluster_key
-          chmod 600 ~/.ssh/cluster_key
-          echo "$(cat ./config/master-ip.txt) ecdsa-sha2-nistp256 AAAA..." >> ~/.ssh/known_hosts
+          ISSUER_URL=$(cat ./config/issuer-url.txt)
+          OIDC_HOST=$(echo "$ISSUER_URL" | sed 's|https://||')
+          echo "OIDC_HOST=${OIDC_HOST}" >> $GITHUB_ENV
 
-      - name: Extract Cluster CA
+      - name: Retrieve Certificate Chain
         run: |
-          ssh -i ~/.ssh/cluster_key ubuntu@$(cat ./config/master-ip.txt) \
-            "sudo cat /etc/kubernetes/pki/ca.crt" > cluster-ca.crt
+          openssl s_client -connect "${OIDC_HOST}:443" -servername "$OIDC_HOST" -showcerts 2>/dev/null > fullchain.pem
+          echo "Certificate chain retrieved:"
+          grep 'BEGIN CERTIFICATE' fullchain.pem | wc -l
 
-          openssl x509 -in cluster-ca.crt -fingerprint -noout | \
-            awk -F= '{gsub(/:/,"",$2); print $2}' > cluster-thumbprint.txt
+      - name: Extract Root CA
+        run: |
+          awk '/BEGIN CERT/{f=1; i++} f && i==3; /END CERT/{f=0}' fullchain.pem > root.pem
+          echo "Root CA Subject:"
+          openssl x509 -in root.pem -noout -subject
+
+      - name: Generate Thumbprint
+        run: |
+          openssl x509 -in root.pem -fingerprint -sha1 -noout | \
+            cut -d= -f2 | tr -d ':' > cluster-thumbprint.txt
+          echo "Thumbprint: $(cat cluster-thumbprint.txt)"
+
+      - name: Validate Thumbprint
+        run: |
+          EXPECTED="7F3C6019D7E5A240E50E9F042D625EF4A7E8F6B5"
+          ACTUAL=$(cat cluster-thumbprint.txt)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Invalid thumbprint! Expected: $EXPECTED, Actual: $ACTUAL"
+            exit 1
+          fi
 
       - name: Update Pulumi Config
         uses: pulumi/actions@v4
         with:
-          command: config set --secret clusterCaThumbprint
-          args: $(cat cluster-thumbprint.txt)
+          command: config set --secret
+          args: clusterOidcThumbprint $(cat cluster-thumbprint.txt)
 
-      - name: Clean Sensitive Files
+      - name: Cleanup Sensitive Files
         run: |
-          shred -zu cluster-ca.crt cluster-thumbprint.txt
-          rm -f ~/.ssh/cluster_key
+          shred -zu fullchain.pem root.pem cluster-thumbprint.txt
 
   configure-oidc:
     needs: extract-thumbprint

@@ -1,5 +1,6 @@
 {
   "variables": {
+    "bastion_user": "bastion-user",
     "cluster_name": "{{env `CLUSTER_NAME`}}",
     "source_ami": "{{env `SOURCE_AMI`}}",
     "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}"
@@ -9,6 +10,20 @@
     "region": "{{user `aws_region`}}",
     "source_ami": "{{user `source_ami`}}",
     "instance_type": "t2.micro",
+    "metadata_options": {
+      "http_tokens": "required",               
+      "http_put_response_hop_limit": 2,
+      "http_endpoint": "enabled" 
+    },
+    "temporary_key_pair_type": "ed25519",  
+    "temporary_key_pair_ttl": "30m",
+    "ena_support": true,  
+    "enable_t2_unlimited": false,             
+    "launch_block_device_mappings": [{
+      "device_name": "/dev/sda1",
+      "encrypted": true,                     
+      "delete_on_termination": true
+      }],
     "ami_name": "k8s-{{user `cluster_name`}}-bastion-{{timestamp}}",
     "ssh_username": "ubuntu",
     "tags": {
@@ -33,14 +48,33 @@
         "sudo apt-get update",
         "sudo apt-get upgrade -y",
         "sudo apt-get install -y python3-pip sshpass",
-        "sudo pip3 install ansible"
+        "sudo pip3 install ansible",
+        "sudo chmod 0750 /var/log/tlog",          
+        "sudo chown root:adm /var/log/tlog/*",
+        "sudo rm -f /home/ubuntu/.ssh/authorized_keys",
+        "sudo useradd -m -s /bin/bash {{user `bastion_user`}}",
+        "sudo usermod -aG sudo {{user `bastion_user`}}",
+        "echo '{{user `bastion_user`}} ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-bastion-init",
+        "sudo mkdir -p /home/{{user `bastion_user`}}/.ssh",
+        "sudo cp /home/ubuntu/.ssh/authorized_keys /home/{{user `bastion_user`}}/.ssh/",
+        "sudo chown -R {{user `bastion_user`}}:{{user `bastion_user`}} /home/{{user `bastion_user`}}/.ssh"
       ]
     },
     {
       "type": "ansible",
       "playbook_file": "ansible/bastion.yaml",
       "extra_arguments": [
-        "--vault-password-file=/tmp/vault-pass"
+        "--extra-vars", "bastion_user={{user `bastion_user`}}",
+        "--extra-vars", "is_packer_build=true",
+        "--user", "{{user `bastion_user`}}"  
+      ]
+      
+    },
+    {
+      "type": "shell",
+      "inline": [
+        "sudo deluser --remove-home ubuntu",
+        "sudo rm /etc/sudoers.d/90-bastion-init"
       ]
     }
   ],

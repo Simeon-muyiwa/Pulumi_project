@@ -87,10 +87,7 @@ const workerLaunchTemplate = new aws.ec2.LaunchTemplate("worker-launch-template"
     httpTokens: "required",
     httpPutResponseHopLimit: 2
   },
-  userData: pulumi.interpolate`#!/bin/bash
-  echo "OIDC_ISSUER_URL=${coreExports.oidcDomain}" >> /etc/kubernetes/kubelet.env
-  systemctl restart kubelet
-  `,
+
   tagSpecifications: [{
     resourceType: "instance",
     tags: {

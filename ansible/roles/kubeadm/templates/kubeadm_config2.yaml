@@ -1,42 +1,102 @@
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
-kubernetesVersion: {{ kubectl_version | regex_replace('\\*$', '') }}
-controlPlaneEndpoint: "{{ hostvars['k8s_master'].private_ip }}:6443"
-
+kubernetesVersion: {{ kubectl_version | regex_replace('\*$', '') }}
+controlPlaneEndpoint: "{{ CLUSTER_ENDPOINT }}:6443"
 apiServer:
   certSANs:
   - "{{ hostvars['k8s_master'].public_ip }}"
   - "{{ hostvars['k8s_master'].private_ip }}"
-  - "oidc.{{domain}}"  
+  - "oidc.{{ DOMAIN }}"
   - "{{ BASTION_PUBLIC_IP }}"
-  extraArgs:    
-    oidc-issuer-url: "{{ oidc_issuer_url }}"
-    oidc-client-id: "{{ oidc_client_id }}" # For AWS IRSA
-    oidc-username-claim: sub
-    oidc-groups-claim: groups
-networking:
-  podSubnet: "{{ POD_NETWORK_CIDR }}"
-  serviceSubnet: "{{ SERVICE_CIDR }}"
-  dnsDomain: "cluster.local"
-   
+  - "{{ CLUSTER_ENDPOINT }}"
+  - "kubernetes.default.svc"
+  extraArgs:
+    # OIDC Configuration
+    service-account-issuer: "https://oidc.{{ DOMAIN }}"
+    service-account-jwks-uri: "https://oidc.{{ DOMAIN }}/openid/v1/jwks"
+    service-account-signing-key-file: /etc/kubernetes/pki/sa.key
+    api-audiences: "sts.amazonaws.com,https://kubernetes.default.svc,oidc.{{ DOMAIN }}"
+    
+    # Security Hardening
+    enable-admission-plugins: "NodeRestriction,PodSecurity,EventRateLimit"
+    admission-control-config-file: /etc/kubernetes/admission-control.yaml
+    audit-log-path: /var/log/apiserver/audit.log
+    audit-policy-file: /etc/kubernetes/audit-policy.yaml
+    audit-log-maxbackup: "10"
+    encryption-provider-config: /etc/kubernetes/encryption.conf
+    tls-cipher-suites: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    service-account-lookup: "true"
+    service-account-extend-token-expiration: "true"
+    service-account-max-token-expiration: "86400"  # 24h
+    
+  extraVolumes:
+  - name: sa-keys
+    hostPath: /etc/kubernetes/pki
+    mountPath: /etc/kubernetes/pki
+    readOnly: true
+  - name: audit-policies
+    hostPath: /etc/kubernetes/audit
+    mountPath: /etc/kubernetes/audit
+    readOnly: true
+  - name: encryption-config
+    hostPath: /etc/kubernetes/encryption
+    mountPath: /etc/kubernetes/encryption
+    readOnly: true
+
 controllerManager:
   extraArgs:
-     cloud-provider: external
-     cluster-cidr: "{{ POD_NETWORK_CIDR }}"
-    enable-admission-plugins: "NodeRestriction,PodSecurity"
-    authorization-mode: "Node,RBAC"
-    allocate-node-cidrs: "true"
-    node-cidr-mask-size: "24"
+    cloud-provider: external
+    cluster-cidr: "{{ POD_NETWORK_CIDR }}"
     service-cluster-ip-range: "{{ SERVICE_CIDR }}"
+    service-account-private-key-file: /etc/kubernetes/pki/sa.key
+    root-ca-file: /etc/kubernetes/pki/ca.crt
+    experimental-cluster-signing-duration: "8760h"  # 1 year
+    feature-gates: "RotateKubeletServerCertificate=true"
+    bind-address: 0.0.0.0
+    secure-port: "10257"
+    terminated-pod-gc-threshold: "100"
+    pod-eviction-timeout: "30s"
+    node-monitor-grace-period: "40s"
+    authorization-webhook-config-file: /etc/kubernetes/webhook-authz.yaml
+
 scheduler:
-  extraArgs: {}
+  extraArgs:
+    bind-address: 0.0.0.0
+    secure-port: "10259"
+    profiling: "false"
+  extraVolumes:
+  - name: scheduler-config
+    hostPath: /etc/kubernetes/scheduler
+    mountPath: /etc/kubernetes/scheduler
+    readOnly: true
+
 etcd:
   local:
     dataDir: /var/lib/etcd
     extraArgs:
-      listen-client-urls: "https://127.0.0.1:{{ etcd_client_port }},https://{{ ansible_default_ipv4.address }}:{{ etcd_client_port }}"
-      advertise-client-urls: "https://{{ ansible_default_ipv4.address }}:{{ etcd_client_port }}"
+      client-cert-auth: "true"
+      trusted-ca-file: /etc/kubernetes/pki/etcd/ca.crt
+      cert-file: /etc/kubernetes/pki/etcd/server.crt
+      key-file: /etc/kubernetes/pki/etcd/server.key
+      listen-client-urls: "https://127.0.0.1:2379,https://{{ ansible_default_ipv4.address }}:2379"
+      advertise-client-urls: "https://{{ ansible_default_ipv4.address }}:2379"
+      auto-compaction-retention: "8"
+      quota-backend-bytes: "8589934592"  # 8GB
+    serverCertSANs:
+    - "{{ ansible_hostname }}"
+    - "{{ ansible_default_ipv4.address }}"
+    - "etcd.{{ DOMAIN }}"
+    peerCertSANs:
+    - "{{ ansible_hostname }}"
+    - "{{ ansible_default_ipv4.address }}"
+
+networking:
+  podSubnet: "{{ POD_NETWORK_CIDR }}"
+  serviceSubnet: "{{ SERVICE_CIDR }}"
+  dnsDomain: "cluster.local"
+  serviceNodePortRange: "30000-32767"
+
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
@@ -48,11 +108,50 @@ nodeRegistration:
     read-only-port: "0"
     event-qps: "0"
     protect-kernel-defaults: "true"
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-cgroupDriver: systemd
-failSwapOn: false
-readOnlyPort: 0
-serializeImagePulls: false
-clusterDomain: "cluster.local"
+    feature-gates: "RotateKubeletServerCertificate=true"
+    tls-cipher-suites: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    authorization-mode: "Webhook"
+    authentication-token-webhook: "true"
+    volume-plugin-dir: "/etc/kubernetes/volume-plugins"
+  taints:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+
+# below should belong to worker node so move it to different file
+# ---
+# apiVersion: kubelet.config.k8s.io/v1beta1
+# kind: KubeletConfiguration
+# cgroupDriver: systemd
+# failSwapOn: false
+# serializeImagePulls: false
+# readOnlyPort: 0
+# clusterDomain: "cluster.local"
+# authentication:
+#   x509:
+#     clientCAFile: /etc/kubernetes/pki/ca.crt
+#   webhook:
+#     enabled: true
+#     cacheTTL: "5m0s"
+#   anonymous:
+#     enabled: false
+# authorization:
+#   mode: Webhook
+#   webhook:
+#     cacheAuthorizedTTL: "5m0s"
+#     cacheUnauthorizedTTL: "30s"
+# memorySwap: {}
+# swapBehavior: "LimitedSwap"
+# evictionHard:
+#   memory.available: "500Mi"
+#   nodefs.available: "10%"
+#   nodefs.inodesFree: "5%"
+#   imagefs.available: "10%"
+# kubeReserved:
+#   cpu: "500m"
+#   memory: "512Mi"
+#   ephemeral-storage: "1Gi"
+# systemReserved:
+#   cpu: "500m"
+#   memory: "512Mi"
+#   ephemeral-storage: "1Gi"
+# seccompDefault: true

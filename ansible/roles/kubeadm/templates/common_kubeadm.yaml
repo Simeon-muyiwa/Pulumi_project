@@ -14,14 +14,15 @@
 
   tasks:
     # Phase 1: System Preparation
-    - name: Validate Ubuntu version
+    - name: Verify baseline hardware
       assert:
         that:
-          - ansible_distribution == 'Ubuntu'
-          - ansible_distribution_version in ['20.04', '22.04']
-        msg: "Unsupported OS version"
+          - ansible_processor_vcpus >= 2
+          - ansible_memtotal_mb >= 2048
+          - ansible_distribution in ['Ubuntu', 'Debian']
+        msg: "Minimum system requirements not met"
 
-    - name: Install baseline packages
+    - name: Install essential packages
       apt:
         name:
           - curl
@@ -31,6 +32,8 @@
           - apt-transport-https
           - ca-certificates
           - jq
+          - openssl
+          - libssl-dev
           - nfs-common
           - conntrack
         state: present
@@ -38,20 +41,20 @@
         retries: 3
         delay: 10
 
-    # Phase 2: Containerd Configuration
+    # Phase 2: Containerd Setup
     - name: Add Docker repository
       apt_repository:
         repo: "deb [arch={{ ansible_architecture }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
         state: present
         filename: docker-ce-stable
 
-    - name: Install specific containerd version
+    - name: Install containerd runtime
       apt:
         name: "containerd.io={{ containerd_version }}"
         state: present
         force: yes
 
-    - name: Configure containerd base template
+    - name: Configure containerd defaults
       copy:
         dest: /etc/containerd/config.toml
         content: |
@@ -62,10 +65,16 @@
           [plugins."io.containerd.grpc.v1.cri".containerd]
             snapshotter = "overlayfs"
             disable_snapshot_annotations = false
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+              SystemdCgroup = true
+              Root = "/var/lib/containerd/runc"
+              runtime_type = "io.containerd.runc.v2"
+              runtime_engine = "/usr/bin/runc"
+              privileged_without_host_devices = false
       notify: restart containerd
 
-    # Phase 3: Kernel Tuning
-    - name: Load kernel modules
+    # Phase 3: Kernel Optimization
+    - name: Load required kernel modules
       modprobe:
         name: "{{ item }}"
         state: present
@@ -85,21 +94,21 @@
         reload: yes
       loop: "{{ sysctl_params | dict2items }}"
 
-    # Phase 4: Kubernetes Installation
-    - name: Add Kubernetes repository
+    # Phase 4: Kubernetes Base Installation
+    - name: Add Kubernetes repo
       apt_repository:
         repo: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version.split('.')[0] }}/deb/ /"
         state: present
         filename: kubernetes-stable
 
-    - name: Pin Kubernetes packages
+    - name: Pin k8s package versions
       apt_preferences:
         filename: k8s-pin
         package: "*"
         pin: "version {{ k8s_version }}-*"
         pin_priority: 1000
 
-    - name: Install kubeadm stack
+    - name: Install kube components
       apt:
         name:
           - kubelet={{ k8s_version }}
@@ -108,7 +117,7 @@
         state: present
         install_recommends: no
 
-    - name: Prevent auto-upgrades
+    - name: Lock package versions
       dpkg_selections:
         name: "{{ item }}"
         selection: hold
@@ -117,33 +126,33 @@
         - kubeadm
         - kubectl
 
-    # Phase 5: Systemd Optimization
-    - name: Configure kubelet systemd defaults
+    # Phase 5: System Configuration
+    - name: Configure kubelet defaults
       copy:
         dest: /etc/default/kubelet
         content: |
-          KUBELET_EXTRA_ARGS="--node-ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)"
+          KUBELET_EXTRA_ARGS="--node-ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4) \
+            --protect-kernel-defaults=true \
+            --enforce-node-allocatable=pods \
+            --read-only-port=0 \
+            --event-qps=0"
           KUBELET_CGROUP_ARGS="--cgroup-driver=systemd"
-          KUBELET_RESERVED="--kube-reserved=cpu=250m,memory=1Gi"
       notify: restart kubelet
 
-- name: Generate service account key pair
-  command: |
-    kubeadm init phase certs sa \
-      --cert-dir /etc/kubernetes/pki \
-      --config /tmp/kubeadm-config.yaml
-  args:
-    creates: /etc/kubernetes/pki/sa.key
-  when:
-    - node_role == "master"
-  tags: ami_build
+    - name: Install AppArmor utilities
+      apt:
+        name: apparmor-utils
+        state: present
 
-- name: Provision PKI structure
-  file:
-    path: /etc/kubernetes/pki
-    state: directory
-    mode: 0700
-  tags: ami_build
+    - name: Load AppArmor profiles
+      command: apparmor_parser -r -W /etc/apparmor.d/*
+      when: ansible_distribution in ['Ubuntu', 'Debian']
+
+    - name: Create PKI directory
+      file:
+        path: /etc/kubernetes/pki
+        state: directory
+        mode: 0700
 
   handlers:
     - name: restart containerd

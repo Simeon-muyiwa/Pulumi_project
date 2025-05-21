@@ -6,6 +6,8 @@ const config = new pulumi.Config();
 // =====================
 // Security Validations
 // =====================
+const DEFAULT_THUMBPRINT = "6938FD4D98BAB03FAADB9B696E3539A2CA71AD7E"; // Let's Encrypt ISRG Root X1
+
 const validateThumbprint = (secret: pulumi.Output<string>) => {
   return secret.apply(t => {
     if (!t) throw new Error("Missing required thumbprint");
@@ -18,7 +20,7 @@ const githubThumbprint = validateThumbprint(
 );
 
 const clusterCaThumbprint = validateThumbprint(
-  config.requireSecret("clusterCaThumbprint")
+  config.getSecret("clusterCaThumbprint") ?? pulumi.output(DEFAULT_THUMBPRINT)
 );
 
 // ===================

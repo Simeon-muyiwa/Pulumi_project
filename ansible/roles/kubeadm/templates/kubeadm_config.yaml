@@ -21,13 +21,6 @@ apiServer:
     # Audience Configuration
     api-audiences: "sts.amazonaws.com,https://kubernetes.default.svc"
     
-    # OIDC Provider Settings
-    oidc-issuer-url: "https://oidc.{{ DOMAIN }}"
-    oidc-client-id: "sts.amazonaws.com"
-    oidc-username-claim: sub
-    oidc-username-prefix: "aws:"
-    oidc-groups-claim: aud
-    
     # Security Enhancements
     service-account-lookup: "true"
     service-account-max-token-expiration: "86400"
@@ -47,8 +40,9 @@ controllerManager:
   extraArgs:
     cloud-provider: external
     cluster-cidr: "{{ POD_NETWORK_CIDR }}"
-    enable-admission-plugins: "NodeRestriction,PodSecurity"
+    enable-admission-plugins: "NodeRestriction,PodSecurity, ServiceAccount"
     service-account-private-key-file: /etc/kubernetes/pki/sa.key
+    experimental-cluster-signing-duration: "87600h"  # 10 years
     root-ca-file: /etc/kubernetes/pki/ca.crt
     authorization-mode: "Node,RBAC"
     allocate-node-cidrs: "true"

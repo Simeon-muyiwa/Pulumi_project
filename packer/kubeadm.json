@@ -4,13 +4,20 @@
     "node_role": "{{env `NODE_ROLE`}}",
     "source_ami": "{{env `SOURCE_AMI`}}",
     "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}",
-    "k8s_version": "1.29.0"
+    "k8s_version": "1.29.*" 
   },
   "builders": [{
     "type": "amazon-ebs",
     "region": "{{user `aws_region`}}",
     "source_ami": "{{user `source_ami`}}",
     "instance_type": "t3.small",
+    "ena_support": true,
+    "enable_t2_unlimited": false,
+    "launch_block_device_mappings": [{
+      "device_name": "/dev/sda1",
+      "encrypted": true,
+      "delete_on_termination": true
+    }],
     "ami_name": "k8s-{{user `cluster_name`}}-{{user `node_role`}}-{{timestamp}}",
     "ssh_username": "ubuntu",
     "tags": {
@@ -18,7 +25,8 @@
       "Component": "kubernetes",
       "AutoUpdate": "true",
       "PackerBuilt": "true",
-      "K8sVersion": "{{user `k8s_version`}}"
+      "K8sVersion": "{{user `k8s_version`}}",
+      "EncryptedRoot": "true"
     },
     "ami_regions": ["{{user `aws_region`}}"],
     "associate_public_ip_address": false,
@@ -26,6 +34,10 @@
     "run_tags": {
       "TemporaryBuildInstance": "true",
       "Name": "{{user `cluster_name`}}-packer-builder"
+    },
+    "metadata_options": {
+      "http_tokens": "required",
+      "http_endpoint": "enabled"
     }
   }],
   "provisioners": [
@@ -35,8 +47,11 @@
         "sudo rm -rf /etc/apt/sources.list.d/docker.list",
         "sudo systemctl stop apt-daily.service",
         "sudo systemctl kill --kill-who=all apt-daily.service",
-        "sudo cloud-init clean"
-      ]
+        "sudo cloud-init clean",
+        "sudo shred -u /etc/ssh/ssh_host_*_key",
+        "sudo userdel -r ubuntu",  
+        "sudo shred -u /etc/sudoers.d/90-cloud-init-users" 
+      ] 
     },
     {
       "type": "ansible",
@@ -60,7 +75,8 @@
       "inline": [
         "mkdir -p build-artifacts/{{user `node_role`}}",
         "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt",
-        "sudo find /etc/kubernetes/pki -type f -name 'sa.*' -exec shred -zu {} ;"
+        "sudo find /etc/kubernetes/pki -type f -name 'sa.*' -exec shred -zu {} \\;",
+        "openssl dgst -sha256 build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt > build-artifacts/{{user `node_role`}}/hash.sha256"
       ]
     },
     {

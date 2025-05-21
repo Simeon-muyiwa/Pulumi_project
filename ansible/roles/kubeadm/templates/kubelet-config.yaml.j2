@@ -1,11 +1,30 @@
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
-cgroupDriver: {{ kubelet_config.cgroupDriver }}
-protectKernelDefaults: {{ kubelet_config.protectKernelDefaults }}
-readOnlyPort: {{ kubelet_config.readOnlyPort }}
+cgroupDriver: systemd
+protectKernelDefaults: true
+readOnlyPort: 0
 authentication:
-  x509:
-    clientCAFile: {{ kubelet_config.authentication.x509.clientCAFile }}
+  webhook:
+    enabled: true
+    cacheTTL: "5m0s"
+  x509:  # Added for certificate verification alignment
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+  anonymous:
+    enabled: false
 authorization:
-  mode: {{ kubelet_config.authorization.mode }}
-serverTLSBootstrap: true  # Required for certificate rotation
+  mode: Webhook
+serverTLSBootstrap: true
+tlsCipherSuites:
+  - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+  - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+evictionHard:
+  memory.available: "500Mi"
+  nodefs.available: "10%"
+seccompDefault: true
+kubeReserved:
+  cpu: "500m"
+  memory: "512Mi"
+systemReserved:  # Added to match master's resource management
+  cpu: "300m"
+  memory: "256Mi"
+eventRecordQPS: 0  # Security enhancement matching master

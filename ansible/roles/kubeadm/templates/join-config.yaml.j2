@@ -1,0 +1,19 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "{{ cluster_endpoint }}:6443"
+    token: "{{ hostvars['k8_master'].join_token }}"
+    unsafeSkipCAVerification: false  # Enforce CA verification
+    caCertHashes: 
+      - "sha256:{{ master_ca_hash }}"  # Populated from master's /etc/kubernetes/pki/ca.crt
+nodeRegistration:
+  name: "{{ ansible_hostname }}"
+  kubeletExtraArgs:
+    cloud-provider: external
+    cloud-config: /etc/kubernetes/cloud-provider.conf
+    protect-kernel-defaults: "true"
+    read-only-port: "0"
+    tls-cipher-suites: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    rotate-certificates: "true"  # Align with master's certificate rotation
+    client-ca-file: /etc/kubernetes/pki/ca.crt  # Match master's CA path
