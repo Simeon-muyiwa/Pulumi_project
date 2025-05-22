@@ -1,0 +1,12 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+{% for rule in audit_policy %}
+- level: {{ rule.level }}
+  {% if rule.namespaces %}
+  namespaces: {{ rule.namespaces }}
+  {% endif %}
+  {% if rule.resources %}
+  resources: {{ rule.resources }}
+  {% endif %}
+{% endfor %}

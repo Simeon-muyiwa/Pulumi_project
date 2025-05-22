@@ -5,13 +5,22 @@
   vars_files:
     - aws.config
   vars:
-    kubectl_version: "1.29.*"
+    k8s_version: "1.29.*"
     oidc_issuer_url: "https://oidc.{{ DOMAIN }}"
     etcd_ports: [2379, 2380]
     control_plane_ports: [6443, 10250, 10259, 10257]
+    admission_plugins:
+      - name: EventRateLimit
+        config: |
+          limits:
+          - type: Namespace
+            qps: 50
+            burst: 100
+    audit_policy:
+      - level: Metadata
+        namespaces: ["kube-system"]
 
   tasks:
-    # Phase 1: Pre-Flight Checks
     - name: Validate system prerequisites
       block:
         - name: Verify hardware requirements
@@ -21,7 +30,6 @@
               - ansible_memtotal_mb >= 4096
               - ansible_distribution in ['Ubuntu', 'Debian']
             msg: "System requirements not met"
-
         - name: Check AWS metadata service
           uri:
             url: http://169.254.169.254/latest/meta-data/iam/info
@@ -30,8 +38,14 @@
           failed_when: >
             iam_metadata.status != 200 or
             'k8s-{{ CLUSTER_ID }}-master-profile' not in iam_metadata.content
+        - name: Verify containerd config
+          command: containerd config validate
+          changed_when: false
+        - name: Check kernel module persistence
+          shell: lsmod | grep -e overlay -e br_netfilter
+          register: mod_check
+          failed_when: mod_check.stdout == ""
 
-    # Phase 2: Security Foundation
     - name: Configure host firewall
       ufw:
         rule: "{{ item.rule }}"
@@ -43,7 +57,6 @@
         - { rule: deny, port: all }
       notify: reload ufw
 
-    # Phase 3: PKI Preparation
     - name: Ensure SA key pair exists
       openssl_key:
         path: /etc/kubernetes/pki/sa.key
@@ -53,7 +66,47 @@
       register: sa_keys
       notify: restart containerd
 
-    # Phase 4: Cloud Configuration
+    - name: Ensure etcd data directory
+      file:
+        path: /var/lib/etcd
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: 0700
+
+    - name: Security Configuration Files
+      block:
+        - name: Create admission control config
+          template:
+            src: admission-control.yaml.j2
+            dest: /etc/kubernetes/admission-control.yaml
+            mode: 0600
+        - name: Deploy encryption configuration
+          template:
+            src: encryption-config.yaml.j2
+            dest: /etc/kubernetes/encryption.conf
+            mode: 0600
+        - name: Create audit policy
+          template:
+            src: audit-policy.yaml.j2
+            dest: /etc/kubernetes/audit-policy.yaml
+            mode: 0640
+        - name: Create audit log directory
+          file:
+            path: /var/log/apiserver/
+            state: directory
+            mode: 0700
+        - name: Generate OIDC JWKS public key
+          shell: |
+            openssl rsa -in /etc/kubernetes/pki/sa.key -pubout > /etc/kubernetes/pki/sa.pub
+          creates: /etc/kubernetes/pki/sa.pub
+        - name: Ensure volume plugins directory
+          file:
+            path: /etc/kubernetes/volume-plugins
+            state: directory
+            mode: 0755
+      notify: restart kube-apiserver
+
     - name: Deploy cloud provider config
       template:
         src: cloud-provider.conf.j2
@@ -64,7 +117,6 @@
         cluster_id: "{{ CLUSTER_ID }}"
       notify: restart kubelet
 
-    # Phase 5: OIDC Setup
     - name: Configure OIDC discovery
       include_role:
         name: oidc-discovery
@@ -73,7 +125,6 @@
         sa_pub_key: /etc/kubernetes/pki/sa.pub
       when: oidc_enabled | default(true)
 
-    # Phase 6: kubeadm Config Generation
     - name: Render kubeadm config
       template:
         src: kubeadm-config.yaml.j2
@@ -83,8 +134,11 @@
         oidc_jwks_uri: "{{ oidc_issuer_url }}/openid/v1/jwks"
         etcd_client_port: 2379
         etcd_server_port: 2380
+        audit_policy_path: /etc/kubernetes/audit-policy.yaml
+        audit_log_path: /var/log/apiserver/audit.log
+        admission_control_config: /etc/kubernetes/admission-control.yaml
+        encryption_config: /etc/kubernetes/encryption.conf
 
-    # Phase 7: Cluster Initialization
     - name: Bootstrap control plane
       command: >
         kubeadm init --config /etc/kubernetes/kubeadm-config.yaml
@@ -95,7 +149,6 @@
       args:
         creates: /etc/kubernetes/admin.conf
 
-    # Phase 8: Post-Init Configuration
     - block:
         - name: Setup kubectl config
           copy:
@@ -104,14 +157,11 @@
             remote_src: yes
             owner: "{{ ansible_user }}"
             mode: 0600
-
         - name: Install Flannel CNI
           command: kubectl apply -f kube-flannel.yml
           when: init_result is changed
-
       when: init_result is changed
 
-    # Phase 9: Join Command Generation
     - name: Create secure join token
       command: >
         kubeadm token create
@@ -126,7 +176,6 @@
       delegate_to: "{{ item }}"
       loop: "{{ groups['k8_workers'] }}"
 
-    # Phase 10: Validation Suite
     - name: Verify cluster components
       block:
         - name: Check OIDC integration
@@ -135,13 +184,11 @@
           register: oidc_check
           failed_when: >
             oidc_issuer_url not in oidc_check.stdout
-
         - name: Validate cloud provider
           command: kubectl describe nodes | grep 'ProviderID'
           register: cloud_provider_check
           failed_when: >
             'aws://' not in cloud_provider_check.stdout
-
         - name: Test IRSA readiness
           command: >
             kubectl create token --audience sts.amazonaws.com test-account
@@ -154,14 +201,17 @@
       service:
         name: ufw
         state: reloaded
-
     - name: restart containerd
       service:
         name: containerd
         state: restarted
-
     - name: restart kubelet
       service:
         name: kubelet
+        state: restarted
+        daemon_reload: yes
+    - name: restart kube-apiserver
+      service:
+        name: kube-apiserver
         state: restarted
         daemon_reload: yes

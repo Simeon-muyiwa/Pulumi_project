@@ -21,6 +21,8 @@ on:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
+  K8S_VERSION: "1.29.*"
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
   CLUSTER_DOMAIN: ${{ secrets.CLUSTER_DOMAIN }}
   PULUMI_STACK: ${{ secrets.PULUMI_STACK }}
   GITHUB_REPO: ${{ github.repository }}
@@ -67,6 +69,9 @@ jobs:
           sudo apt-get install -y ansible packer python3 python3-pip jq
           pip3 install boto3
 
+      - name: Install Ansible Roles
+        run: ansible-galaxy install devsec.hardening
+
       - name: Capture GitHub Thumbprint
         run: |
           openssl s_client -connect token.actions.githubusercontent.com:443 \
@@ -98,16 +103,32 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: packer-bastion-${{ github.run_id }}
           role-tags: |
-            Component=Packer
-            NodeRole=bastion
+            Component=Bastion 
+            ClusterName=${{ env.CLUSTER_NAME }}
+            K8sVersion=${{ env.K8S_VERSION }}
+
+      - name: Validate Bastion Variables
+        run: |
+          echo "Validating variables for: $NODE_ROLE"
+          if [ -z "$CLUSTER_NAME"]; then echo "CLUSTER_NAME not set"; exit 1; fi
+          if [ -z "$SOURCE_AMI"]; then echo "SOURCE_AMI not set"; exit 1; fi
+          if [ -z "$BASTION_USER"]; then echo "BASTION_USER not set"; exit 1; fi
+          echo "AWS_REGION: $AWS_REGION"
 
       - name: Build Bastion AMI
         uses: hashicorp/packer-github-actions@v1
+        env:
+          BASTION_USER: "bastion_user"
+          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         with:
           command: build -force
-          arguments: infrastructure/packer/bastion.json
-          env_vars: |
-            AWS_SESSION_TOKEN=${{ env.AWS_SESSION_TOKEN }}
+          arguments: |
+            -var "cluster_name=${CLUSTER_NAME}" \
+            -var "source_ami=${SOURCE_AMI}" \
+            -var "bastion_user=${BASTION_USER}" \
+            -var "security_group_ids=${{ secrets.BASTION_SG }}"
+            -var "aws_region=${AWS_REGION}"
+            infrastructure/packer/bastion.json
 
       - name: Upload Bastion AMI ID
         uses: actions/upload-artifact@v3
@@ -141,6 +162,19 @@ jobs:
           role-tags: |
             Component=Packer
             NodeRole=${{ matrix.node_role }}
+            ClusterName=${{ env.CLUSTER_NAME }}
+            K8sVersion=${{ env.K8S_VERSION }}
+
+      - name: Validate Packer Variables
+        run: |
+          echo "Validating variables for: $NODE_ROLE"
+          if [ -z "$CLUSTER_NAME"]; then echo "CLUSTER_NAME not set"; exit 1; fi
+          if [ -z "$SOURCE_AMI"]; then echo "SOURCE_AMI not set"; exit 1; fi
+          if [[ ! "$NODE_ROLE" =~ ^(master|worker)$ ]]; then echo "Invalid NODE_ROLE: $Node_ROLE"; EXIT 1 fi
+          echo "AWS_REGION: $AWS_REGION"
+          echo "K8S_VERSION: $K8S_VERSION"
+          env: 
+            NODE_ROLE: {{ matrix.node_role }}
 
       - name: Setup SSH Access
         run: |
@@ -151,11 +185,16 @@ jobs:
       - name: Build AMI
         uses: hashicorp/packer-github-actions@v1
         env:
-          NODE_ROLE: ${{ matrix.node_role }}
-          CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         with:
           command: build -force
-          arguments: infrastructure/packer/kubeadm.json
+          arguments: |
+            -var "cluster_name=${CLUSTER_NAME}" \
+            -var "node_role=${NODE_ROLE}" \
+            -var "k8s_version=${K8S_VERSION}" \
+            -var "source_ami=${SOURCE_AMI}" \
+            -var "aws_region=${AWS_REGION}"
+            infrastructure/packer/kubeadm.json
           workdir: "infrastructure/packer"
 
       - name: Upload AMI ID
@@ -164,6 +203,14 @@ jobs:
           name: ${{ matrix.node_role }}-ami-id
           path: infrastructure/packer/build-artifacts/${{ matrix.node_role }}/kubeadm_ami_id.txt
           retention-days: 3
+
+      - name: Secure Cleanup
+        if: ${{ always() }}
+        run: |
+          echo "Wiping sensitive data..." 
+          shred -zu ~/.ssh/deployer
+          rm -f infrastructure/packer/build-artifacts/*/*.key
+          sudo rm -rf /tmp/.ansible
 
   pulumi-deploy:
     needs: [packer-build, bastion-packer-build]

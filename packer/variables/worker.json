@@ -1,0 +1,7 @@
+{
+    "cluster_name": "prod-k8s",
+    "node_role": "worker",
+    "k8s_version": "1.29.2",
+    "source_ami": "ami-0abcdef1234567890",
+    "aws_region": "eu-west-2"
+}

@@ -6,11 +6,21 @@
     containerd_version: "1.7.*"
     k8s_version: "1.29.*"
     sysctl_params:
+      # Networking
       net.bridge.bridge-nf-call-ip6tables: 1
       net.bridge.bridge-nf-call-iptables: 1
       net.ipv4.ip_forward: 1
+      net.core.somaxconn: 8192
+      net.ipv4.tcp_tw_reuse: 1
+
+      # Security
+      kernel.kptr_restrict: 2
       vm.swappiness: 10
+
+      # Monitoring/Performance
       fs.inotify.max_user_watches: 524288
+      fs.file-max: 2097152
+      net.core.netdev_max_backlog: 16384
 
   tasks:
     # Phase 1: System Preparation
@@ -86,13 +96,15 @@
         - ip_vs_sh
         - nf_conntrack
 
-    - name: Apply sysctl parameters
+    - name: Apply cluster-wide kernel parameters
       sysctl:
         name: "{{ item.key }}"
         value: "{{ item.value }}"
         sysctl_set: yes
         reload: yes
       loop: "{{ sysctl_params | dict2items }}"
+      notify: restart kubelet
+      tags: [security, kernel]
 
     # Phase 4: Kubernetes Base Installation
     - name: Add Kubernetes repo

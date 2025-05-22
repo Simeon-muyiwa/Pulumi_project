@@ -6,7 +6,7 @@
   vars_files:
     - aws.config
   vars:
-    kubelet_version: "1.29.*"
+    k8s_version: "1.29.*"
     node_labels:
       topology.kubernetes.io/zone: "{{ ansible_ec2_placement_availability_zone }}"
       node.kubernetes.io/instance-type: "{{ ansible_ec2_instance_type }}"

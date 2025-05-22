@@ -6,7 +6,7 @@
   vars_files:
     - aws.config
   vars:
-    kubelet_version: "1.29.*"
+    k8s_version: "1.29.*"
     node_taints: []
     kubelet_config_path: /var/lib/kubelet/config.yaml
     cluster_endpoint: "{{ hostvars['k8_master'].ansible_host }}"
@@ -50,17 +50,13 @@
         mode: 0600
       notify: restart kubelet
 
-    - name: Apply kernel parameters
-      sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        sysctl_set: yes
-        reload: yes
-      loop:
-        - { name: net.core.somaxconn, value: 8192 }
-        - { name: net.ipv4.tcp_tw_reuse, value: 1 }
-        - { name: vm.swappiness, value: 10 }
-        - { name: kernel.kptr_restrict, value: 2 }
+    - name: Deploy cluster CA certificate
+      copy:
+        src: /etc/kubernetes/pki/ca.crt
+        dest: /etc/kubernetes/pki/ca.crt
+        remote_src: yes
+        mode: 0644
+      delegate_to: k8_master
 
     # Phase 3: Cluster Join
     - name: Generate join configuration

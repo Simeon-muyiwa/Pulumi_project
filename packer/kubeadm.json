@@ -4,7 +4,7 @@
     "node_role": "{{env `NODE_ROLE`}}",
     "source_ami": "{{env `SOURCE_AMI`}}",
     "aws_region": "{{env `AWS_REGION` | default `eu-west-2`}}",
-    "k8s_version": "1.29.*" 
+    "k8s_version": "{{env `K8S_VERSION` | default `1.29.*`}}"
   },
   "builders": [{
     "type": "amazon-ebs",
@@ -37,6 +37,7 @@
     },
     "metadata_options": {
       "http_tokens": "required",
+      "http_put_response_hop_limit": 2,
       "http_endpoint": "enabled"
     }
   }],
@@ -75,6 +76,7 @@
       "inline": [
         "mkdir -p build-artifacts/{{user `node_role`}}",
         "echo '{{.Builds.0.ArtifactID}}' > build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt",
+        "sudo kubeadm reset --force", 
         "sudo find /etc/kubernetes/pki -type f -name 'sa.*' -exec shred -zu {} \\;",
         "openssl dgst -sha256 build-artifacts/{{user `node_role`}}/kubeadm_ami_id.txt > build-artifacts/{{user `node_role`}}/hash.sha256"
       ]

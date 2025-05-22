@@ -4,6 +4,12 @@
   become: true
   vars:
     bastion_user: "bastion-user"
+    # Bastion-specific kernel hardening
+    sysctl_params:
+      net.ipv4.conf.all.rp_filter: 1
+      net.ipv4.icmp_echo_ignore_broadcasts: 1
+      net.ipv4.tcp_syncookies: 1
+      kernel.dmesg_restrict: 1
     sshd_config:
       Protocol: 2
       PermitRootLogin: "no"
@@ -40,6 +46,16 @@
       vars:
         os_hardening_remove_legacy_files: true
         os_hardening_enable_module_loading: false
+
+    # Added bastion-specific kernel hardening
+    - name: Apply bastion kernel parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: yes
+        reload: yes
+      loop: "{{ sysctl_params | dict2items }}"
+      notify: restart sshd
 
     - name: Configure SSHd
       lineinfile:
